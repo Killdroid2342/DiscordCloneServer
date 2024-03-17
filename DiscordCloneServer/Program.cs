@@ -1,8 +1,10 @@
+using Microsoft.EntityFrameworkCore;
 
 namespace DiscordCloneServer
 {
     public class Program
     {
+        static readonly string connectionString = "Data Source=DESKTOP-28PDSSI\\DiscordClone;Initial Catalog=DiscordClone;User ID=sa;Password=123456;Encrypt=False;TrustServerCertificate=True";
         public static void Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
@@ -14,6 +16,7 @@ namespace DiscordCloneServer
             builder.Services.AddEndpointsApiExplorer();
             builder.Services.AddSwaggerGen();
 
+            ConfirgureServices(builder.Services);
             var app = builder.Build();
 
             // Configure the HTTP request pipeline.
@@ -31,6 +34,16 @@ namespace DiscordCloneServer
             app.MapControllers();
 
             app.Run();
+        }
+        private static void ConfirgureServices(IServiceCollection services)
+        {
+
+            services.AddDbContext<DiscordContext>(opt => opt.UseSqlServer(connectionString));
+            services.AddControllers();
+            services.AddEndpointsApiExplorer();
+            services.AddSwaggerGen();
+            // services.AddMvc().AddnewtosoftJSON();
+
         }
     }
 }
