@@ -1,40 +1,40 @@
-﻿using Microsoft.AspNetCore.Http;
+﻿using DiscordCloneServer.Data;
+using DiscordCloneServer.Models;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DiscordCloneServer.Controllers
 {
-    public class AccountController : Controller
+    [Route("api/[controller]/[action]")]
+    [ApiController]
+    public class AccountController : ControllerBase
     {
-        public class Account
+        private readonly ApiContext _context;
+        public AccountController(ApiContext context)
         {
-            public string Id;
-            public string UserName;
-            public string Password;
-
+            _context = context;
         }
 
-        // POST: AccountController/Create
+        // create/edit
         [HttpPost]
-        [Route("/Account/Register")]
-
-        public ActionResult Create([FromBody] Account model)
+        public JsonResult CreateAccount(RegisterAccount account)
         {
-            try
+            if (account.Id == 0)
             {
-                Console.WriteLine($"Received registration data: {model.Id}, {model.UserName}, {model.Password}");
-
-
-                return RedirectToAction(nameof(Index));
+                _context.Accounts.Add(account);
+                Console.WriteLine("this is the account");
+                Console.WriteLine(account);
+                Console.WriteLine(_context);
             }
-            catch (Exception ex)
+            else
             {
-                // Log error
-                Console.WriteLine($"Error during registration: {ex.Message}");
-                return View();
+                var accountInDb = _context.Accounts.Find(account.Id);
+                if (accountInDb == null) return new JsonResult(NotFound());
+                accountInDb = account;
             }
+            _context.SaveChanges();
+            return new JsonResult(Ok(account));
         }
-
 
     }
-
 }
