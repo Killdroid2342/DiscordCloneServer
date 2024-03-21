@@ -17,7 +17,7 @@ namespace DiscordCloneServer.Controllers
 
         // create/edit
         [HttpPost]
-        public JsonResult CreateAccount(RegisterAccount account)
+        public JsonResult CreateAccount(Account account)
         {
             if (account.Id == 0)
             {
