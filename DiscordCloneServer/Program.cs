@@ -1,6 +1,6 @@
+using System.Configuration;
 using DiscordCloneServer.Data;
 using Microsoft.EntityFrameworkCore;
-
 namespace DiscordCloneServer
 {
     public class Program
@@ -11,9 +11,9 @@ namespace DiscordCloneServer
 
             // Add services to the container.
             builder.Services.AddDbContext<ApiContext>
-                (opt => opt.UseSqlServer("Data Source=DESKTOP-28PDSSI\\FIRSTDB;Initial Catalog=DiscordClone;User ID=sa;Password=123456;Encrypt=False;TrustServerCertificate=True",
+                (opt => opt.UseSqlServer("Data Source=DESKTOP-28PDSSI\\FIRSTDB;Initial Catalog=DiscordClone;User ID=sa;Password=123456;Encrypt=False;TrustServerCertificate=True\r\n",
                 opt => opt.EnableRetryOnFailure()));
-
+            // "Data Source=DESKTOP-28PDSSI\\FIRSTDB;Initial Catalog=DiscordClone;User ID=sa;Password=123456;Encrypt=False;TrustServerCertificate=True"
 
             builder.Services.AddControllers();
             // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
