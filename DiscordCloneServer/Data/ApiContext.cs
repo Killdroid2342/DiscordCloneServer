@@ -1,4 +1,5 @@
-﻿using DiscordCloneServer.Models;
+﻿using System;
+using DiscordCloneServer.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace DiscordCloneServer.Data
@@ -16,13 +17,16 @@ namespace DiscordCloneServer.Data
                 Database.Migrate();
             }
         }
-
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
-            base.OnModelCreating(modelBuilder);
 
-            // Specify the table name for the Account entity
+
             modelBuilder.Entity<Account>().ToTable("Accounts");
+            base.OnModelCreating(modelBuilder);
+            Console.WriteLine("this line was read");
+
+
         }
+
     }
 }
