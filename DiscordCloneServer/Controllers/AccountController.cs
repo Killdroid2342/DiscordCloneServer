@@ -24,7 +24,7 @@ namespace DiscordCloneServer.Controllers
                 // Check if the username already exists
                 if (_context.Accounts.Any(a => a.UserName == account.UserName))
                 {
-                    return new JsonResult(new { Error = "Username already exists." }) { StatusCode = StatusCodes.Status409Conflict };
+                    return new JsonResult(new { Error = "Username already exists." });
                 }
 
 
@@ -35,12 +35,12 @@ namespace DiscordCloneServer.Controllers
                 var accountInDb = _context.Accounts.Find(account.Id);
                 if (accountInDb == null)
                 {
-                    return new JsonResult(new { Error = "Account not found." }) { StatusCode = StatusCodes.Status404NotFound };
+                    return new JsonResult(new { Error = "Account not found." });
                 }
 
                 if (_context.Accounts.Any(a => a.UserName == account.UserName && a.Id != account.Id))
                 {
-                    return new JsonResult(new { Error = "Username already exists." }) { StatusCode = StatusCodes.Status409Conflict };
+                    return new JsonResult(new { Error = "Username already exists." });
                 }
 
                 accountInDb.UserName = account.UserName;
@@ -48,7 +48,7 @@ namespace DiscordCloneServer.Controllers
 
             // Save changes to the database
             _context.SaveChanges();
-            return new JsonResult(account) { StatusCode = StatusCodes.Status200OK };
+            return new JsonResult(account);
         }
 
 

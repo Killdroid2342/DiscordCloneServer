@@ -13,7 +13,6 @@ namespace DiscordCloneServer.Data
         {
             if (!Database.CanConnect())
             {
-                // Database does not exist, create it
                 Database.Migrate();
             }
         }
