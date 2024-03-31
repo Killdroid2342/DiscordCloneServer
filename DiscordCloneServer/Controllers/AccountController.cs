@@ -1,4 +1,5 @@
-﻿using DiscordCloneServer.Data;
+﻿using System;
+using DiscordCloneServer.Data;
 using DiscordCloneServer.Models;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -48,6 +49,27 @@ namespace DiscordCloneServer.Controllers
 
             // Save changes to the database
             _context.SaveChanges();
+            return new JsonResult(account);
+        }
+        [HttpPost]
+        public JsonResult LogIn(Account account)
+        {
+            try
+            {
+                if (_context.Accounts.Any(a => a.UserName == account.UserName && a.PassWord == account.PassWord))
+                {
+                    Console.WriteLine("Correct Details");
+
+                }
+                else
+                {
+                    Console.WriteLine("Wrong Details");
+                }
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+            }
             return new JsonResult(account);
         }
 
