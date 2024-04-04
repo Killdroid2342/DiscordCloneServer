@@ -1,6 +1,9 @@
 using System.Configuration;
+using System.Text;
 using DiscordCloneServer.Data;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 
 namespace DiscordCloneServer
 {
@@ -9,6 +12,7 @@ namespace DiscordCloneServer
         public static void Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
+
             var MyAllowSpecificOrigins = "_myAllowSpecificOrigins";
 
             // Add services to the container.
@@ -20,10 +24,28 @@ namespace DiscordCloneServer
                         policy.WithOrigins("http://127.0.0.1:5500").AllowAnyHeader();
                     });
             });
+
             builder.Services.AddDbContext<ApiContext>
                 (opt => opt.UseSqlServer("Data Source=DESKTOP-28PDSSI\\FIRSTDB;Initial Catalog=DiscordClone;User ID=sa;Password=123456;Encrypt=False;TrustServerCertificate=True\r\n",
                 opt => opt.EnableRetryOnFailure()));
 
+            var jwtIssuer = builder.Configuration.GetSection("Jwt:Issuer").Get<string>();
+            var jwtKey = builder.Configuration.GetSection("Jwt:Key").Get<string>();
+
+            builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+             .AddJwtBearer(options =>
+             {
+                 options.TokenValidationParameters = new TokenValidationParameters
+                 {
+                     ValidateIssuer = true,
+                     ValidateAudience = true,
+                     ValidateLifetime = true,
+                     ValidateIssuerSigningKey = true,
+                     ValidIssuer = jwtIssuer,
+                     ValidAudience = jwtIssuer,
+                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+                 };
+             });
             builder.Services.AddControllers();
             // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
             builder.Services.AddEndpointsApiExplorer();
