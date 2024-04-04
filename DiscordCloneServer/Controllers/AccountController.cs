@@ -1,8 +1,12 @@
 ﻿using System;
+using System.IdentityModel.Tokens.Jwt;
+using System.Text;
 using DiscordCloneServer.Data;
 using DiscordCloneServer.Models;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using Microsoft.IdentityModel.Tokens;
 
 namespace DiscordCloneServer.Controllers
 {
@@ -11,9 +15,12 @@ namespace DiscordCloneServer.Controllers
     public class AccountController : ControllerBase
     {
         private readonly ApiContext _context;
-        public AccountController(ApiContext context)
+        private readonly IConfiguration _config;
+
+        public AccountController(ApiContext context, IConfiguration config)
         {
             _context = context;
+            _config = config;
         }
 
         // create/edit
@@ -59,11 +66,25 @@ namespace DiscordCloneServer.Controllers
                 if (_context.Accounts.Any(a => a.UserName == account.UserName && a.PassWord == account.PassWord))
                 {
                     Console.WriteLine("Correct Details");
+                    new JsonResult(new { message = "Correct Details" });
+                    var securityKey = new SymmetricSecurityKey(Encoding.UTF32.GetBytes(_config["Jwt:Key"]));
+                    var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
+
+                    var Sectoken = new JwtSecurityToken(_config["Jwt:Issuer"],
+                      _config["Jwt:Issuer"],
+                      null,
+                      expires: DateTime.Now.AddMinutes(120),
+                      signingCredentials: credentials);
+
+                    var token = new JwtSecurityTokenHandler().WriteToken(Sectoken);
+                    Console.WriteLine(token);
+                    return new JsonResult(new { message = "Correct Details", token });
 
                 }
                 else
                 {
                     Console.WriteLine("Wrong Details");
+                    return new JsonResult(new { message = "Wrong Details" });
                 }
             }
             catch (Exception e)
