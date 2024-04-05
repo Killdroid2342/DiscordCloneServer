@@ -66,7 +66,6 @@ namespace DiscordCloneServer.Controllers
                 if (_context.Accounts.Any(a => a.UserName == account.UserName && a.PassWord == account.PassWord))
                 {
                     Console.WriteLine("Correct Details");
-                    new JsonResult(new { message = "Correct Details" });
                     var securityKey = new SymmetricSecurityKey(Encoding.UTF32.GetBytes(_config["Jwt:Key"]));
                     var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
@@ -94,6 +93,18 @@ namespace DiscordCloneServer.Controllers
             return new JsonResult(account);
         }
 
+        [HttpPost]
+        public JsonResult VerifyToken(Account account)
+        {
+            try
+            {
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+            }
+            return new JsonResult(account);
+        }
 
     }
 }
