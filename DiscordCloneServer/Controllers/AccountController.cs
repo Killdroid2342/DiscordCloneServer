@@ -94,17 +94,35 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpPost]
-        public JsonResult VerifyToken(Account account)
+        public JsonResult VerifyToken(string token)
         {
             try
             {
+                Console.WriteLine(token);
+                var securityKey = new SymmetricSecurityKey(Encoding.UTF32.GetBytes(_config["Jwt:Key"]));
+
+                var tokenHandler = new JwtSecurityTokenHandler();
+                Console.WriteLine(tokenHandler);
+                tokenHandler.ValidateToken(token, new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidateAudience = false,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    ValidIssuer = _config["Jwt:Issuer"],
+                    IssuerSigningKey = securityKey
+                }, out var validatedToken);
+
+                Console.WriteLine("Token is correct.");
+                return new JsonResult(new { message = "Token is correct." });
             }
-            catch (Exception e)
+            catch (Exception)
             {
-                Console.WriteLine(e);
+                Console.WriteLine("Token is not correct.");
+                return new JsonResult(new { message = "Token is not correct." });
             }
-            return new JsonResult(account);
         }
+
 
     }
 }
