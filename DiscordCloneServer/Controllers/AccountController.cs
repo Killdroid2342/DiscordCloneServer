@@ -77,6 +77,13 @@ namespace DiscordCloneServer.Controllers
 
                     var token = new JwtSecurityTokenHandler().WriteToken(Sectoken);
                     Console.WriteLine(token);
+                    HttpContext.Response.Cookies.Append("JWT", token, new CookieOptions
+                    {
+                        HttpOnly = true,
+                        Secure = true,
+                        SameSite = SameSiteMode.Strict,
+                        Expires = DateTimeOffset.Now.AddMinutes(120),
+                    });
                     return new JsonResult(new { message = "Correct Details", token });
 
                 }
