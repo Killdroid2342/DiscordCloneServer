@@ -15,14 +15,17 @@ namespace DiscordCloneServer
 
             var MyAllowSpecificOrigins = "_myAllowSpecificOrigins";
 
-            // Add services to the container.
+
             builder.Services.AddCors(options =>
             {
                 options.AddPolicy(name: MyAllowSpecificOrigins,
                     policy =>
                     {
-                        policy.WithOrigins("http://127.0.0.1:5500").AllowAnyHeader();
+                        policy.WithOrigins("http://127.0.0.1:5500", "https://localhost:7170")
+                            .AllowCredentials()
+                            .WithHeaders("Content-Type", "Accept", "Authorization");
                     });
+
             });
 
             builder.Services.AddDbContext<ApiContext>
@@ -65,6 +68,7 @@ namespace DiscordCloneServer
 
             app.UseCors(MyAllowSpecificOrigins);
 
+            app.UseAuthentication();
             app.UseAuthorization();
 
 

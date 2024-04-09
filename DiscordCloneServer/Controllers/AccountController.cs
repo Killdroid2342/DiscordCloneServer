@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Text;
 using DiscordCloneServer.Data;
 using DiscordCloneServer.Models;
@@ -69,22 +70,23 @@ namespace DiscordCloneServer.Controllers
                     var securityKey = new SymmetricSecurityKey(Encoding.UTF32.GetBytes(_config["Jwt:Key"]));
                     var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
-                    var Sectoken = new JwtSecurityToken(_config["Jwt:Issuer"],
-                      _config["Jwt:Issuer"],
-                      null,
-                      expires: DateTime.Now.AddMinutes(120),
-                      signingCredentials: credentials);
+                    var claims = new List<Claim>
+            {
+                new Claim("username", account.UserName) // Include the "test" claim with the username
+            };
 
-                    var token = new JwtSecurityTokenHandler().WriteToken(Sectoken);
-                    Console.WriteLine(token);
-                    HttpContext.Response.Cookies.Append("JWT", token, new CookieOptions
-                    {
-                        HttpOnly = true,
-                        Secure = true,
-                        SameSite = SameSiteMode.Strict,
-                        Expires = DateTimeOffset.Now.AddMinutes(120),
-                    });
-                    return new JsonResult(new { message = "Correct Details", token });
+                    var token = new JwtSecurityToken(
+                        _config["Jwt:Issuer"],
+                        null,
+                        claims: claims,
+                        expires: DateTime.Now.AddDays(14),
+                        signingCredentials: credentials
+                    );
+
+                    var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
+                    Console.WriteLine(tokenString);
+
+                    return new JsonResult(new { message = "Correct Details", token = tokenString });
 
                 }
                 else
@@ -99,6 +101,7 @@ namespace DiscordCloneServer.Controllers
             }
             return new JsonResult(account);
         }
+
 
         [HttpPost]
         public JsonResult VerifyToken(string token)
