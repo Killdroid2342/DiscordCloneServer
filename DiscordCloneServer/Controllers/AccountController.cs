@@ -71,9 +71,9 @@ namespace DiscordCloneServer.Controllers
                     var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
                     var claims = new List<Claim>
-            {
-                new Claim("username", account.UserName) // Include the "test" claim with the username
-            };
+                    {
+                        new Claim("username", account.UserName) // Include the "test" claim with the username
+                    };
 
                     var token = new JwtSecurityToken(
                         _config["Jwt:Issuer"],

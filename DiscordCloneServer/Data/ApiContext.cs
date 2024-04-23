@@ -7,7 +7,7 @@ namespace DiscordCloneServer.Data
     public class ApiContext : DbContext
     {
         public DbSet<Account> Accounts { get; set; }
-
+        public DbSet<CreateServer> CreateServers { get; set; }
         public ApiContext(DbContextOptions<ApiContext> options)
             : base(options)
         {
@@ -21,6 +21,7 @@ namespace DiscordCloneServer.Data
 
 
             modelBuilder.Entity<Account>().ToTable("Accounts");
+            modelBuilder.Entity<CreateServer>().ToTable("Create_Server");
             base.OnModelCreating(modelBuilder);
             Console.WriteLine("this line was read");
 
