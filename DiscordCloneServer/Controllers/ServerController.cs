@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace DiscordCloneServer.Controllers
 {
-    [Route("api/[controller]")]
+    [Route("api/[controller]/[action]")]
     [ApiController]
     public class ServerController : ControllerBase
     {
@@ -24,8 +24,12 @@ namespace DiscordCloneServer.Controllers
 
             _context.CreateServers.Add(createServer);
 
+            _context.SaveChanges();
             return new JsonResult(createServer);
         }
+
+
     }
 
 }
+
