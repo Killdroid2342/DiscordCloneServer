@@ -28,7 +28,23 @@ namespace DiscordCloneServer.Controllers
             return new JsonResult(createServer);
         }
 
+        [HttpGet]
+        [HttpGet]
+        public IActionResult GetServer(string username)
+        {
+            var servers = _context.CreateServers
+                                .Where(server => server.ServerOwner == username)
+                                .ToList();
 
+            if (servers.Any())
+            {
+                return new JsonResult(servers);
+            }
+            else
+            {
+                return NotFound("No servers found for the provided username");
+            }
+        }
     }
 
 }
