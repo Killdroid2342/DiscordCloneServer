@@ -1,4 +1,5 @@
-﻿using DiscordCloneServer.Data;
+﻿using System.Text.Json;
+using DiscordCloneServer.Data;
 using DiscordCloneServer.Migrations;
 using DiscordCloneServer.Models;
 using Microsoft.AspNetCore.Mvc;
@@ -29,8 +30,7 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
-        [HttpGet]
-        public IActionResult GetServer(string username)
+        public JsonResult GetServer(string username)
         {
             var servers = _context.CreateServers
                                 .Where(server => server.ServerOwner == username)
@@ -38,11 +38,11 @@ namespace DiscordCloneServer.Controllers
 
             if (servers.Any())
             {
-                return new JsonResult(servers);
+                return new JsonResult(servers, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
             }
             else
             {
-                return NotFound("No servers found for the provided username");
+                return new JsonResult(new { Message = "No servers here" }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
             }
         }
     }
