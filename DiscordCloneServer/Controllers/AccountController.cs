@@ -72,7 +72,7 @@ namespace DiscordCloneServer.Controllers
 
                     var claims = new List<Claim>
                     {
-                        new Claim("username", account.UserName) // Include the "test" claim with the username
+                        new Claim("username", account.UserName)
                     };
 
                     var token = new JwtSecurityToken(
