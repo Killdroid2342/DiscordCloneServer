@@ -10,5 +10,6 @@ namespace DiscordCloneServer.Models
         public string ServerName { get; set; }
         public string MessagesUserSender { get; set; }
         public string Date { get; set; }
+        public string userText { get; set; }
     }
 }
