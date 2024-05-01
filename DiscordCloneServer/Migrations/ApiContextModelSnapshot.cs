@@ -85,6 +85,10 @@ namespace DiscordCloneServer.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("userText")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
                     b.HasKey("MessageID");
 
                     b.ToTable("Server_Message", (string)null);
