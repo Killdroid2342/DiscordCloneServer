@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using DiscordCloneServer.Data;
+using DiscordCloneServer.Migrations;
 using DiscordCloneServer.Models;
 using Microsoft.AspNetCore.Mvc;
 
@@ -27,9 +28,17 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
-        public JsonResult GetServerMessages(string username)
+        public JsonResult GetServerMessages(string serverID)
         {
-            return new JsonResult(username);
+            try
+            {
+                var messages = _context.ServerMessages.Where(msg => msg.ServerID == serverID).ToList();
+                return new JsonResult(messages);
+            }
+            catch (Exception ex)
+            {
+                return new JsonResult($"Internal server error: {ex.Message}");
+            }
         }
     }
 }
