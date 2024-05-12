@@ -9,9 +9,7 @@ namespace DiscordCloneServer.Models
         public int Id { get; set; }
         public string UserName { get; set; }
         public string PassWord { get; set; }
-
-        public string[] Followers { get; set; }
-        public string[] Following { get; set; }
+        public string[] Friends { get; set; }
 
     }
 }
