@@ -18,8 +18,7 @@ namespace DiscordCloneServer.Migrations
                         .Annotation("SqlServer:Identity", "1, 1"),
                     Username = table.Column<string>(type: "nvarchar(max)", nullable: false),
                     Password = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    Followers = table.Column<string[]>(type: "nvarchar(max)", nullable: true),
-                    Following = table.Column<string[]>(type: "nvarchar(max)", nullable: true)
+                    Friends = table.Column<string>(type: "nvarchar(max)", nullable: false),
                 },
                 constraints: table =>
                 {

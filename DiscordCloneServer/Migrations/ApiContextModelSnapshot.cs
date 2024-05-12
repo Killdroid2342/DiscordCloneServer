@@ -30,11 +30,7 @@ namespace DiscordCloneServer.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("Followers")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("Following")
+                    b.Property<string>("Friends")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
