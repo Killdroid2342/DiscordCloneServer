@@ -2,12 +2,16 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using DiscordCloneServer.Data;
+using DiscordCloneServer.Migrations;
 using DiscordCloneServer.Models;
+using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
+using Account = DiscordCloneServer.Models.Account;
 
 namespace DiscordCloneServer.Controllers
 {
@@ -30,7 +34,6 @@ namespace DiscordCloneServer.Controllers
         {
             if (account.Id == 0)
             {
-                // Check if the username already exists
                 if (_context.Accounts.Any(a => a.UserName == account.UserName))
                 {
                     return new JsonResult(new { message = "Username already exists." });
@@ -55,7 +58,6 @@ namespace DiscordCloneServer.Controllers
                 accountInDb.UserName = account.UserName;
             }
 
-            // Save changes to the database
             _context.SaveChanges();
             return new JsonResult(account);
         }
@@ -130,6 +132,61 @@ namespace DiscordCloneServer.Controllers
             {
                 Console.WriteLine("Token is not correct.");
                 return new JsonResult(new { message = "Token is not correct." });
+            }
+        }
+
+        [HttpPost]
+        public JsonResult AddFriend(string username, string friendUsername)
+        {
+            try
+            {
+                var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                if (userAccount == null)
+                {
+                    return new JsonResult(new { message = "User account not found." });
+                }
+
+                var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
+                if (friendAccount == null)
+                {
+                    return new JsonResult(new { message = "Friend account not found." });
+                }
+
+                if (userAccount.Friends != null && userAccount.Friends.Contains(friendUsername))
+                {
+                    return new JsonResult(new { message = "Friend already added." });
+                }
+
+                if (userAccount.Friends == null)
+                {
+                    userAccount.Friends = [friendUsername];
+                }
+                else
+                {
+                    var updatedUserFriendsList = userAccount.Friends.ToList();
+                    updatedUserFriendsList.Add(friendUsername);
+                    userAccount.Friends = updatedUserFriendsList.ToArray();
+                }
+
+                if (friendAccount.Friends == null)
+                {
+                    friendAccount.Friends = [username];
+                }
+                else
+                {
+                    var updatedFriendFriendsList = friendAccount.Friends.ToList();
+                    updatedFriendFriendsList.Add(username);
+                    friendAccount.Friends = updatedFriendFriendsList.ToArray();
+                }
+
+                _context.SaveChanges();
+
+                return new JsonResult(new { message = "Friend added successfully." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error adding friend: {ex.Message}");
+                return new JsonResult(new { message = "Error adding friend." });
             }
         }
 
