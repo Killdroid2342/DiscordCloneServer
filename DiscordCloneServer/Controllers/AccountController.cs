@@ -189,6 +189,32 @@ namespace DiscordCloneServer.Controllers
                 return new JsonResult(new { message = "Error adding friend." });
             }
         }
+        [HttpGet]
+        public JsonResult GetFriends(string username)
+        {
+            try
+            {
+                var account = _context.Accounts.FirstOrDefault(account => account.UserName == username);
+
+                if (account != null)
+                {
+                    if (!account.Friends.Any())
+                        return new JsonResult("No Friends Added!");
+
+                    return new JsonResult(account.Friends);
+                }
+                else
+                {
+                    return new JsonResult("User not found");
+                }
+
+            }
+            catch (Exception ex)
+            {
+                return new JsonResult("Internal server error");
+            }
+        }
+
 
 
     }
