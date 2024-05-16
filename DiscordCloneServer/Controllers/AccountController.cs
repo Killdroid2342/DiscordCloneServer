@@ -141,15 +141,10 @@ namespace DiscordCloneServer.Controllers
             try
             {
                 var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
-                if (userAccount == null)
-                {
-                    return new JsonResult(new { message = "User account not found." });
-                }
-
                 var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
-                if (friendAccount == null)
+                if (userAccount == null || friendAccount == null)
                 {
-                    return new JsonResult(new { message = "Friend account not found." });
+                    return new JsonResult(new { message = "Account not found." });
                 }
 
                 if (userAccount.Friends != null && userAccount.Friends.Contains(friendUsername))
@@ -215,7 +210,51 @@ namespace DiscordCloneServer.Controllers
             }
         }
 
+        [HttpPost]
+        public JsonResult RemoveFriend(string username, string friendUsername)
+        {
+            try
+            {
+                var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
+
+                if (userAccount == null || friendAccount == null)
+                {
+                    return new JsonResult(new { message = "Account not found." });
+                }
+
+                if (userAccount.Friends != null && userAccount.Friends.Contains(friendUsername))
+                {
+                    var userFriendsList = userAccount.Friends.ToList();
+                    userFriendsList.Remove(friendUsername);
+                    userAccount.Friends = userFriendsList.ToArray();
+
+                    if (friendAccount.Friends != null && friendAccount.Friends.Contains(username))
+                    {
+                        var friendFriendsList = friendAccount.Friends.ToList();
+                        friendFriendsList.Remove(username);
+                        friendAccount.Friends = friendFriendsList.ToArray();
+                    }
+
+                    _context.SaveChanges();
+
+                    return new JsonResult(new { message = "Friend removed successfully." });
+                }
+                else
+                {
+                    return new JsonResult(new { message = "Friend not found in user's friend list." });
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error removing friend: {ex.Message}");
+                return new JsonResult(new { message = "Error removing friend." });
+            }
+        }
+
+
 
 
     }
 }
+
