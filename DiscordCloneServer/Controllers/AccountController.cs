@@ -1,15 +1,8 @@
-﻿using System;
-using System.IdentityModel.Tokens.Jwt;
+﻿using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
-using System.Text.Json;
 using DiscordCloneServer.Data;
-using DiscordCloneServer.Migrations;
-using DiscordCloneServer.Models;
-using Microsoft.AspNetCore.Hosting.Server;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using Account = DiscordCloneServer.Models.Account;
 
@@ -39,8 +32,9 @@ namespace DiscordCloneServer.Controllers
                     return new JsonResult(new { message = "Username already exists." });
                 }
 
-
                 _context.Accounts.Add(account);
+                _context.SaveChanges();
+                return new JsonResult(new { message = "Created Account" });
             }
             else
             {
@@ -251,10 +245,6 @@ namespace DiscordCloneServer.Controllers
                 return new JsonResult(new { message = "Error removing friend." });
             }
         }
-
-
-
-
     }
 }
 
