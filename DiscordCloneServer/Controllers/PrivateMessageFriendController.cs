@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace DiscordCloneServer.Controllers
 {
-    [Route("api/[controller]")]
+    [Route("api/[controller]/[action]")]
     [ApiController]
     public class PrivateMessageFriendController : ControllerBase
     {
@@ -17,9 +17,12 @@ namespace DiscordCloneServer.Controllers
         [HttpPost]
         public JsonResult SendPrivateMessage(Models.PrivateMessageFriend privateMessageFriend)
         {
+            if (_context.PrivateMessageFriends.Any(pm => pm.PrivateMessageID == privateMessageFriend.PrivateMessageID))
+            {
+                return new JsonResult(new { error = "Duplicate PrivateMessageID" });
+            }
 
             _context.PrivateMessageFriends.Add(privateMessageFriend);
-
             _context.SaveChanges();
             return new JsonResult(privateMessageFriend);
         }
