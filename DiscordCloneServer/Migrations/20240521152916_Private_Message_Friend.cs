@@ -1,5 +1,4 @@
-﻿using System;
-using Microsoft.EntityFrameworkCore.Migrations;
+﻿using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
@@ -15,15 +14,15 @@ namespace DiscordCloneServer.Migrations
                 name: "Private_Message_Friend",
                 columns: table => new
                 {
-                    MessageId = table.Column<string>(type: "nvarchar(450)", nullable: false),
-                    friendMessagesData = table.Column<string>(type: "nvarchar(max)", nullable: false),
+                    PrivateMessageID = table.Column<string>(type: "nvarchar(450)", nullable: false),
+                    FriendMessagesData = table.Column<string>(type: "nvarchar(max)", nullable: false),
                     MessageUserReciver = table.Column<string>(type: "nvarchar(max)", nullable: false),
                     MessagesUserSender = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    Date = table.Column<DateTime>(type: "datetime2", nullable: false)
+                    Date = table.Column<string>(type: "nvarchar(max)", nullable: false)
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_Private_Message_Friend", x => x.MessageId);
+                    table.PrimaryKey("PK_Private_Message_Friend", x => x.PrivateMessageID);
                 });
         }
 

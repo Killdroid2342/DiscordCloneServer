@@ -70,11 +70,16 @@ namespace DiscordCloneServer.Migrations
 
             modelBuilder.Entity("DiscordCloneServer.Models.PrivateMessageFriend", b =>
                 {
-                    b.Property<string>("MessageId")
+                    b.Property<string>("PrivateMessageID")
                         .HasColumnType("nvarchar(450)");
 
-                    b.Property<DateTime>("Date")
-                        .HasColumnType("datetime2");
+                    b.Property<string>("Date")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("FriendMessagesData")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("MessageUserReciver")
                         .IsRequired()
@@ -84,11 +89,7 @@ namespace DiscordCloneServer.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<string>("friendMessagesData")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.HasKey("MessageId");
+                    b.HasKey("PrivateMessageID");
 
                     b.ToTable("Private_Message_Friend", (string)null);
                 });
