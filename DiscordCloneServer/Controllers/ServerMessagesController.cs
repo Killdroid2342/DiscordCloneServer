@@ -1,14 +1,11 @@
-﻿using System.Text.Json;
-using DiscordCloneServer.Data;
-using DiscordCloneServer.Migrations;
-using DiscordCloneServer.Models;
+﻿using DiscordCloneServer.Data;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DiscordCloneServer.Controllers
 {
     [Route("api/[controller]/[action]")]
     [ApiController]
-    public class ServerMessagesController : Controller
+    public class ServerMessagesController : ControllerBase
     {
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
