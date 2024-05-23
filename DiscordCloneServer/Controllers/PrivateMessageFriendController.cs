@@ -26,5 +26,15 @@ namespace DiscordCloneServer.Controllers
             _context.SaveChanges();
             return new JsonResult(privateMessageFriend);
         }
+        [HttpGet]
+        public JsonResult GetPrivateMessage(string currentUsername, string targetUsername)
+        {
+            var messages = _context.PrivateMessageFriends
+                .Where(pm => (pm.MessagesUserSender == currentUsername && pm.MessageUserReciver == targetUsername) ||
+                             (pm.MessagesUserSender == targetUsername && pm.MessageUserReciver == currentUsername))
+                .ToList();
+
+            return new JsonResult(messages);
+        }
     }
 }
