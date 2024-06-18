@@ -21,7 +21,6 @@ namespace DiscordCloneServer.Controllers
             {
                 return new JsonResult(new { error = "Duplicate PrivateMessageID" });
             }
-
             _context.PrivateMessageFriends.Add(privateMessageFriend);
             _context.SaveChanges();
             return new JsonResult(privateMessageFriend);
