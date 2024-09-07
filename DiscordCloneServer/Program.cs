@@ -23,7 +23,8 @@ namespace DiscordCloneServer
                     {
                         policy.WithOrigins("http://127.0.0.1:5500", "https://localhost:7170")
                             .AllowCredentials()
-                            .WithHeaders("Content-Type", "Accept", "Authorization");
+                            .AllowAnyHeader()
+                            .AllowAnyMethod();
                     });
 
             });
@@ -55,7 +56,7 @@ namespace DiscordCloneServer
             builder.Services.AddSwaggerGen();
 
             var app = builder.Build();
-
+            app.UseWebSockets();
 
             // Configure the HTTP request pipeline.
             if (app.Environment.IsDevelopment())
