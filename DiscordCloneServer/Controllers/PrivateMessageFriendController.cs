@@ -1,6 +1,10 @@
-﻿using DiscordCloneServer.Data;
+﻿using System.Collections.Concurrent;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using DiscordCloneServer.Data;
 using Microsoft.AspNetCore.Mvc;
-
 namespace DiscordCloneServer.Controllers
 {
     [Route("api/[controller]/[action]")]
@@ -9,6 +13,9 @@ namespace DiscordCloneServer.Controllers
     {
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
+
+        private static ConcurrentDictionary<string, WebSocket> _activeSockets = new ConcurrentDictionary<string, WebSocket>();
+
         public PrivateMessageFriendController(ApiContext context, IConfiguration config)
         {
             _context = context;
@@ -35,5 +42,54 @@ namespace DiscordCloneServer.Controllers
 
             return new JsonResult(messages);
         }
+        [HttpGet]
+        public async Task HandlePrivateWebsocket(string username)
+        {
+            if (HttpContext.WebSockets.IsWebSocketRequest)
+            {
+                WebSocket webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+                _activeSockets[username] = webSocket;
+
+                await ListenForMessages(username, webSocket);
+
+                // Once disconnected, remove the WebSocket
+                _activeSockets.TryRemove(username, out _);
+            }
+            else
+            {
+                HttpContext.Response.StatusCode = 400;
+            }
+        }
+
+        private async Task ListenForMessages(string username, WebSocket webSocket)
+        {
+            var buffer = new byte[1024 * 4];
+
+            while (webSocket.State == WebSocketState.Open)
+            {
+                var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+
+                if (result.MessageType == WebSocketMessageType.Text)
+                {
+                    string messageJson = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                    var privateMessage = Newtonsoft.Json.JsonConvert.DeserializeObject<Models.PrivateMessageFriend>(messageJson);
+
+                    _context.PrivateMessageFriends.Add(privateMessage);
+                    _context.SaveChanges();
+
+                    if (_activeSockets.TryGetValue(privateMessage.MessageUserReciver, out WebSocket receiverSocket) &&
+                        receiverSocket.State == WebSocketState.Open)
+                    {
+                        var messageBuffer = Encoding.UTF8.GetBytes(messageJson);
+                        await receiverSocket.SendAsync(new ArraySegment<byte>(messageBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
+                    }
+                }
+                else if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Connection closed", CancellationToken.None);
+                }
+            }
+        }
+
     }
 }
