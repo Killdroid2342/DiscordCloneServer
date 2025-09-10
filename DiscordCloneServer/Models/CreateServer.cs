@@ -1,13 +1,15 @@
 ﻿using System.ComponentModel.DataAnnotations;
 
-namespace DiscordCloneServer.Models
+public class CreateServer
 {
-    public class CreateServer
-    {
-        [Key]
-        public string ServerID { get; set; }
-        public string ServerName { get; set; }
-        public string ServerOwner { get; set; }
-        public DateTime Date { get; set; }
-    }
+    [Key]
+    public string ServerID { get; set; }
+    [Required]
+    public string ServerName { get; set; }
+
+    [Required]
+    public string ServerOwner { get; set; }
+
+    public string? InviteLink { get; set; }
+    public DateTime? Date { get; set; }
 }

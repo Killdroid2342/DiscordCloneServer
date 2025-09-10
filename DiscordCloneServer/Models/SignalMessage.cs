@@ -2,7 +2,8 @@
 {
     public class SignalMessage
     {
-        public string User { get; set; }
+        public string Type { get; set; }
+        public string From { get; set; }
         public string Data { get; set; }
     }
 }

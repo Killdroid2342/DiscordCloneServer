@@ -8,50 +8,70 @@ namespace DiscordCloneServer.Controllers
     [ApiController]
     public class SignalingController : ControllerBase
     {
-        private static ConcurrentDictionary<string, string> offers = new ConcurrentDictionary<string, string>();
-        private static ConcurrentDictionary<string, string> answers = new ConcurrentDictionary<string, string>();
-        private static ConcurrentQueue<string> iceCandidates = new ConcurrentQueue<string>();
+        private static ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<SignalMessage>>> serverMessages
+            = new ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<SignalMessage>>>();
 
-        [HttpPost("offer")]
-        public async Task<IActionResult> PostOffer([FromBody] SignalMessage message)
+        private static ConcurrentDictionary<string, HashSet<string>> serverUsers
+            = new ConcurrentDictionary<string, HashSet<string>>();
+
+        [HttpPost]
+        public IActionResult SendMessage([FromBody] SignalMessage message, string serverId, string toUser)
         {
-            offers[message.User] = message.Data;
+            var server = serverMessages.GetOrAdd(serverId, _ => new ConcurrentDictionary<string, ConcurrentQueue<SignalMessage>>());
+            var queue = server.GetOrAdd(toUser, _ => new ConcurrentQueue<SignalMessage>());
+            queue.Enqueue(message);
             return Ok();
         }
 
-        [HttpPost("answer")]
-        public async Task<IActionResult> PostAnswer([FromBody] SignalMessage message)
+        [HttpGet]
+        public IActionResult ReceiveMessages(string serverId, string username)
         {
-            answers[message.User] = message.Data;
+            if (serverMessages.TryGetValue(serverId, out var users) &&
+                users.TryGetValue(username, out var queue))
+            {
+                var messages = queue.ToArray();
+                queue.Clear();
+                return Ok(messages);
+            }
+            return Ok(new List<SignalMessage>());
+        }
+
+        [HttpPost]
+        public IActionResult JoinVoice(string serverId, string username)
+        {
+            var users = serverUsers.GetOrAdd(serverId, _ => new HashSet<string>());
+            lock (users)
+            {
+                users.Add(username);
+            }
+            return Ok(users.ToList());
+        }
+
+        [HttpPost]
+        public IActionResult LeaveVoice(string serverId, string username)
+        {
+            if (serverUsers.TryGetValue(serverId, out var users))
+            {
+                lock (users)
+                {
+                    users.Remove(username);
+                }
+            }
             return Ok();
         }
 
-        [HttpPost("ice-candidate")]
-        public async Task<IActionResult> PostIceCandidate([FromBody] SignalMessage message)
-        {
-            iceCandidates.Enqueue(message.Data);
-            return Ok();
-        }
 
-        [HttpGet("offer/{user}")]
-        public async Task<IActionResult> GetOffer(string user)
+        [HttpGet]
+        public IActionResult GetActiveUsers(string serverId)
         {
-            offers.TryGetValue(user, out var offer);
-            return Ok(offer);
-        }
-
-        [HttpGet("answer/{user}")]
-        public async Task<IActionResult> GetAnswer(string user)
-        {
-            answers.TryGetValue(user, out var answer);
-            return Ok(answer);
-        }
-
-        [HttpGet("ice-candidates")]
-        public async Task<IActionResult> GetIceCandidates()
-        {
-            return Ok(iceCandidates.ToArray());
+            if (serverUsers.TryGetValue(serverId, out var users))
+            {
+                lock (users)
+                {
+                    return Ok(users.ToList());
+                }
+            }
+            return Ok(new List<string>());
         }
     }
 }
-
