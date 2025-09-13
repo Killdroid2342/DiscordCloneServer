@@ -1,4 +1,4 @@
-﻿using System.IdentityModel.Tokens.Jwt;
+using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using DiscordCloneServer.Data;
@@ -21,7 +21,7 @@ namespace DiscordCloneServer.Controllers
             _config = config;
         }
 
-        // create/edit
+
         [HttpPost]
         public JsonResult CreateAccount(Account account)
         {
@@ -62,7 +62,7 @@ namespace DiscordCloneServer.Controllers
             {
                 if (_context.Accounts.Any(a => a.UserName == account.UserName && a.PassWord == account.PassWord))
                 {
-                    Console.WriteLine("Correct Details");
+                    Console.WriteLine("login worked");
                     var securityKey = new SymmetricSecurityKey(Encoding.UTF32.GetBytes(_config["Jwt:Key"]));
                     var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
@@ -80,20 +80,20 @@ namespace DiscordCloneServer.Controllers
                     );
 
                     var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
-                    Console.WriteLine(tokenString);
+                    Console.WriteLine($"made token: {tokenString}");
 
                     return new JsonResult(new { message = "Correct Details", token = tokenString });
 
                 }
                 else
                 {
-                    Console.WriteLine("Wrong Details");
+                    Console.WriteLine("wrong login info");
                     return new JsonResult(new { message = "Wrong Details" });
                 }
             }
             catch (Exception e)
             {
-                Console.WriteLine(e);
+                Console.WriteLine($"login broke: {e}");
             }
             return new JsonResult(account);
         }
@@ -104,11 +104,11 @@ namespace DiscordCloneServer.Controllers
         {
             try
             {
-                Console.WriteLine(token);
+                Console.WriteLine($"checking token: {token}");
                 var securityKey = new SymmetricSecurityKey(Encoding.UTF32.GetBytes(_config["Jwt:Key"]));
 
                 var tokenHandler = new JwtSecurityTokenHandler();
-                Console.WriteLine(tokenHandler);
+                Console.WriteLine($"token handler: {tokenHandler}");
                 tokenHandler.ValidateToken(token, new TokenValidationParameters
                 {
                     ValidateIssuer = true,
@@ -119,12 +119,12 @@ namespace DiscordCloneServer.Controllers
                     IssuerSigningKey = securityKey
                 }, out var validatedToken);
 
-                Console.WriteLine("Token is correct.");
+                Console.WriteLine("token is good");
                 return new JsonResult(new { message = "Token is correct." });
             }
             catch (Exception)
             {
-                Console.WriteLine("Token is not correct.");
+                Console.WriteLine("token is bad");
                 return new JsonResult(new { message = "Token is not correct." });
             }
         }
@@ -174,7 +174,7 @@ namespace DiscordCloneServer.Controllers
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error adding friend: {ex.Message}");
+                Console.WriteLine($"couldnt add friend: {ex.Message}");
                 return new JsonResult(new { message = "Error adding friend." });
             }
         }
@@ -241,7 +241,7 @@ namespace DiscordCloneServer.Controllers
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error removing friend: {ex.Message}");
+                Console.WriteLine($"couldnt remove friend: {ex.Message}");
                 return new JsonResult(new { message = "Error removing friend." });
             }
         }

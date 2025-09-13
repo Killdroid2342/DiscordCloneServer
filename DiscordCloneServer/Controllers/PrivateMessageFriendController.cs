@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -52,7 +52,7 @@ namespace DiscordCloneServer.Controllers
 
                 await ListenForMessages(username, webSocket);
 
-                // Once disconnected, remove the WebSocket
+    
                 _activeSockets.TryRemove(username, out _);
             }
             else

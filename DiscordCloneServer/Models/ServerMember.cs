@@ -1,4 +1,4 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 
 namespace DiscordCloneServer.Models
 {
@@ -9,5 +9,6 @@ namespace DiscordCloneServer.Models
 
         public string ServerId { get; set; }
         public string Username { get; set; }
+        public string Role { get; set; } = "user";
     }
 }

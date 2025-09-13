@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using DiscordCloneServer.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -30,7 +30,7 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<ServerMember>().ToTable("Server_Members");
 
             base.OnModelCreating(modelBuilder);
-            Console.WriteLine("this line was read");
+            Console.WriteLine("database ready");
         }
     }
 }

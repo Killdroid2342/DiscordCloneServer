@@ -1,4 +1,6 @@
-﻿using System.Text.Json;
+using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
 using DiscordCloneServer.Data;
 using DiscordCloneServer.Models;
 using Microsoft.AspNetCore.Mvc;
@@ -6,6 +8,21 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DiscordCloneServer.Controllers
 {
+    public class ServerIdComparer : IEqualityComparer<CreateServer>
+    {
+        public bool Equals(CreateServer x, CreateServer y)
+        {
+            if (ReferenceEquals(x, y)) return true;
+            if (x is null || y is null) return false;
+            return x.ServerID == y.ServerID;
+        }
+
+        public int GetHashCode([DisallowNull] CreateServer obj)
+        {
+            return obj.ServerID.GetHashCode();
+        }
+    }
+
     [Route("api/[controller]/[action]")]
     [ApiController]
     public class ServerController : ControllerBase
@@ -26,7 +43,7 @@ namespace DiscordCloneServer.Controllers
             if (!ModelState.IsValid)
                 return BadRequest(ModelState);
 
-            Console.WriteLine($"📥 Incoming CreateServer: Name={createServer.ServerName}, Owner={createServer.ServerOwner}");
+            Console.WriteLine($"making new server: '{createServer.ServerName}' by {createServer.ServerOwner}");
 
             if (string.IsNullOrWhiteSpace(createServer.ServerName))
                 return BadRequest(new { Message = "Server name is required." });
@@ -38,6 +55,17 @@ namespace DiscordCloneServer.Controllers
             _context.CreateServers.Add(createServer);
             await _context.SaveChangesAsync();
 
+            var ownerMembership = new ServerMember
+            {
+                Id = Guid.NewGuid().ToString(),
+                ServerId = createServer.ServerID,
+                Username = createServer.ServerOwner,
+                Role = "owner"
+            };
+
+            _context.ServerMembers.Add(ownerMembership);
+            await _context.SaveChangesAsync();
+
             return Ok(createServer);
         }
 
@@ -45,14 +73,47 @@ namespace DiscordCloneServer.Controllers
         [HttpGet]
         public async Task<IActionResult> GetServer(string username)
         {
+            var memberships = await _context.ServerMembers
+                .Where(member => member.Username == username)
+                .ToListAsync();
+
+            var memberServerIds = memberships
+                .Select(member => member.ServerId)
+                .ToList();
+
             var servers = await _context.CreateServers
-                .Where(server => server.ServerOwner == username)
+                .Where(server => memberServerIds.Contains(server.ServerID) || server.ServerOwner == username)
                 .ToListAsync();
 
             if (servers.Any())
             {
+                var serverResponse = servers.Select(server =>
+                {
+                    var membership = memberships.FirstOrDefault(m => m.ServerId == server.ServerID);
+                    string role = "user";
+
+                    if (membership != null)
+                    {
+                        role = membership.Role;
+                    }
+                    else if (server.ServerOwner == username)
+                    {
+                        role = "owner";
+                    }
+
+                    return new
+                    {
+                        server.ServerID,
+                        server.ServerName,
+                        server.ServerOwner,
+                        server.InviteLink,
+                        server.Date,
+                        Role = role
+                    };
+                }).ToList();
+
                 return new JsonResult(
-                    servers,
+                    serverResponse,
                     new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }
                 );
             }
@@ -102,7 +163,8 @@ namespace DiscordCloneServer.Controllers
             {
                 Id = Guid.NewGuid().ToString(),
                 ServerId = server.ServerID,
-                Username = req.Username
+                Username = req.Username,
+                Role = "user"
             };
 
             _context.ServerMembers.Add(membership);
