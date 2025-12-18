@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Linq;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DiscordCloneServer.Controllers
@@ -84,6 +85,10 @@ namespace DiscordCloneServer.Controllers
 
                 switch (messageObj.Type)
                 {
+                    case "identify":
+                        if (messageObj.Username != null)
+                            await HandleIdentify(connection, messageObj.Username);
+                        break;
                     case "join":
                         if (messageObj.ServerId != null && messageObj.Username != null)
                             await HandleJoinVoice(connection, messageObj.ServerId, messageObj.Username);
@@ -96,6 +101,7 @@ namespace DiscordCloneServer.Controllers
                         if (messageObj.TargetUser != null && messageObj.Data != null)
                             await HandleOffer(connection, messageObj.TargetUser, messageObj.Data);
                         break;
+
                     case "answer":
                         if (messageObj.TargetUser != null && messageObj.Data != null)
                             await HandleAnswer(connection, messageObj.TargetUser, messageObj.Data);
@@ -132,12 +138,23 @@ namespace DiscordCloneServer.Controllers
                         if (messageObj.Data != null)
                             await HandleAudioData(connection, messageObj.Data);
                         break;
+                    case "call-ended":
+                        if (messageObj.TargetUser != null)
+                            await HandleCallEnded(connection, messageObj.TargetUser);
+                        break;
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"couldnt process voice msg: {ex.Message}");
             }
+        }
+
+        private async Task HandleIdentify(WebSocketConnection connection, string username)
+        {
+            ConnectionToUser[connection.Id] = username;
+            UserConnections[username] = connection;
+            Console.WriteLine($"[WS] Identified user for DM: {username}");
         }
 
         private async Task HandleJoinVoice(WebSocketConnection connection, string serverId, string username)
@@ -171,7 +188,7 @@ namespace DiscordCloneServer.Controllers
             });
 
 
-            var allUsers = existingUsers.Concat(new[] { username }).ToList();
+            var allUsers = existingUsers.Concat(new[] { username }).Distinct().ToList();
             await BroadcastToServer(serverId, new WebSocketMessage
             {
                 Type = "users-updated",
@@ -189,28 +206,56 @@ namespace DiscordCloneServer.Controllers
                 }
 
 
-                await BroadcastToServer(serverId, new WebSocketMessage
+                bool isUserStillPresent = false;
+                lock (connections)
                 {
-                    Type = "user-left",
-                    Username = username
-                }, connection.Id);
+                    isUserStillPresent = connections.Any(c => ConnectionToUser.TryGetValue(c.Id, out var u) && u == username);
+                }
+
+                if (!isUserStillPresent)
+                {
+
+                    await BroadcastToServer(serverId, new WebSocketMessage
+                    {
+                        Type = "user-left",
+                        Username = username
+                    });
 
 
-                var remainingUsers = connections.Where(c => ConnectionToUser.ContainsKey(c.Id))
-                                               .Select(c => ConnectionToUser[c.Id])
-                                               .ToList();
+                    if (UserConnections.TryGetValue(username, out var uc) && uc.Id == connection.Id)
+                    {
+                        UserConnections.TryRemove(username, out _);
+                        UserToServer.TryRemove(username, out _);
+                    }
+                }
+
+
+                ConnectionToUser.TryRemove(connection.Id, out _); 
+
+
+                List<string> remainingUsers;
+                lock (connections)
+                {
+                    remainingUsers = connections.Where(c => ConnectionToUser.ContainsKey(c.Id))
+                                                   .Select(c => ConnectionToUser[c.Id])
+                                                   .Distinct()
+                                                   .ToList();
+                }
 
                 await BroadcastToServer(serverId, new WebSocketMessage
                 {
                     Type = "users-updated",
                     Data = JsonSerializer.Serialize(remainingUsers)
                 });
+                
+
+                if (connection.WebSocket.State == WebSocketState.Open) {
+                    await SendToConnection(connection, new WebSocketMessage {
+                         Type = "users-updated",
+                         Data = JsonSerializer.Serialize(remainingUsers)
+                    });
+                }
             }
-
-
-            ConnectionToUser.TryRemove(connection.Id, out _);
-            UserConnections.TryRemove(username, out _);
-            UserToServer.TryRemove(username, out _);
         }
 
         private async Task HandleOffer(WebSocketConnection connection, string targetUser, string offer)
@@ -359,7 +404,7 @@ namespace DiscordCloneServer.Controllers
             }
         }
 
-        private async Task HandlePeerIceCandidate(WebSocketConnection connection, string targetUser, string candidate)
+    private async Task HandlePeerIceCandidate(WebSocketConnection connection, string targetUser, string candidate)
         {
             var senderUser = ConnectionToUser.GetValueOrDefault(connection.Id);
             if (senderUser != null && UserConnections.TryGetValue(targetUser, out var targetConnection))
@@ -373,15 +418,39 @@ namespace DiscordCloneServer.Controllers
             }
         }
 
+        private async Task HandleCallEnded(WebSocketConnection connection, string targetUser)
+        {
+            var senderUser = ConnectionToUser.GetValueOrDefault(connection.Id);
+            if (senderUser != null && UserConnections.TryGetValue(targetUser, out var targetConnection))
+            {
+                await SendToConnection(targetConnection, new WebSocketMessage
+                {
+                    Type = "call-ended",
+                    Username = senderUser
+                });
+            }
+        }
+
         private async Task HandleDisconnection(WebSocketConnection connection)
         {
             if (ConnectionToUser.TryRemove(connection.Id, out var username))
             {
-                if (UserToServer.TryRemove(username, out var serverId))
+
+                if (UserToServer.TryGetValue(username, out var serverId))
                 {
                     await HandleLeaveVoice(connection, serverId, username);
                 }
-                UserConnections.TryRemove(username, out _);
+                else
+                {
+
+                    if (UserConnections.TryGetValue(username, out var uc) && uc.Id == connection.Id)
+                    {
+                        UserConnections.TryRemove(username, out _);
+                    }
+                }
+                
+
+
             }
 
             if (connection.WebSocket.State == WebSocketState.Open)
@@ -413,6 +482,7 @@ namespace DiscordCloneServer.Controllers
                 await connection.WebSocket.SendAsync(new ArraySegment<byte>(messageBytes), WebSocketMessageType.Text, true, CancellationToken.None);
             }
         }
+
     }
 
     public class WebSocketConnection
