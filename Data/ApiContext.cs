@@ -29,6 +29,20 @@ namespace DiscordCloneServer.Data
                     v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
                     v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
                 );
+
+            modelBuilder.Entity<Account>()
+                .Property(a => a.IncomingFriendRequests)
+                .HasConversion(
+                    v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
+                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
+                );
+
+            modelBuilder.Entity<Account>()
+                .Property(a => a.OutgoingFriendRequests)
+                .HasConversion(
+                    v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
+                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
+                );
             modelBuilder.Entity<CreateServer>().ToTable("Create_Server");
             modelBuilder.Entity<ServerMessage>().ToTable("Server_Message");
             modelBuilder.Entity<PrivateMessageFriend>().ToTable("Private_Message_Friend");
