@@ -55,7 +55,12 @@ namespace DiscordCloneServer.Migrations
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
                     b.Property<string>("Friends")
-                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("IncomingFriendRequests")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("OutgoingFriendRequests")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("PassWord")
@@ -69,6 +74,49 @@ namespace DiscordCloneServer.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("Accounts", (string)null);
+                });
+
+            modelBuilder.Entity("DiscordCloneServer.Models.Category", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ServerId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Categories", (string)null);
+                });
+
+            modelBuilder.Entity("DiscordCloneServer.Models.Channel", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("CategoryId")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ServerId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Channels", (string)null);
                 });
 
             modelBuilder.Entity("DiscordCloneServer.Models.PrivateMessageFriend", b =>
@@ -124,19 +172,15 @@ namespace DiscordCloneServer.Migrations
                     b.Property<string>("MessageID")
                         .HasColumnType("nvarchar(450)");
 
+                    b.Property<string>("ChannelId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("Date")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("MessagesUserSender")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("ServerID")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("ServerName")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
