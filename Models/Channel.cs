@@ -9,6 +9,6 @@ namespace DiscordCloneServer.Models
         public string ServerId { get; set; }
         public string? CategoryId { get; set; }
         public string Name { get; set; }
-        public string Type { get; set; } // text/voice
+        public string Type { get; set; }
     }
 }

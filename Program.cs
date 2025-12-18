@@ -22,7 +22,7 @@ namespace DiscordCloneServer
                 options.AddPolicy(name: MyAllowSpecificOrigins,
                     policy =>
                     {
-                        policy.WithOrigins("http://127.0.0.1:5500", "https://localhost:7170")
+                        policy.WithOrigins("http://127.0.0.1:5500", "https://localhost:7170", "http://127.0.0.1:8080", "http://localhost:8080")
                             .AllowCredentials()
                             .AllowAnyHeader()
                             .AllowAnyMethod()
@@ -59,6 +59,7 @@ namespace DiscordCloneServer
             
             builder.Services.AddEndpointsApiExplorer();
             builder.Services.AddSwaggerGen();
+            builder.Services.AddSignalR();
 
             try
             {
@@ -80,14 +81,12 @@ namespace DiscordCloneServer
                 using (var scope = app.Services.CreateScope())
                 {
                     var db = scope.ServiceProvider.GetRequiredService<ApiContext>();
-                    if (app.Environment.IsDevelopment())
-                    {
-                        try { db.Database.EnsureDeleted(); } catch { }
-                    }
-                    db.Database.EnsureCreated();
+
+                    db.Database.Migrate();
                 }
 
                 app.MapControllers();
+                app.MapHub<Hubs.ChatHub>("/chatHub");
 
                 Console.WriteLine("starting discord server on http://localhost:5018");
                 app.Run();
