@@ -134,6 +134,11 @@ namespace DiscordCloneServer.Controllers
         {
             try
             {
+                if (username == friendUsername)
+                {
+                    return new JsonResult(new { message = "You cannot add yourself as a friend." });
+                }
+
                 var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
                 var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
                 if (userAccount == null || friendAccount == null)
@@ -146,36 +151,129 @@ namespace DiscordCloneServer.Controllers
                     return new JsonResult(new { message = "Friend already added." });
                 }
 
-                if (userAccount.Friends == null)
+                if (userAccount.OutgoingFriendRequests != null && userAccount.OutgoingFriendRequests.Contains(friendUsername))
                 {
-                    userAccount.Friends = [friendUsername];
-                }
-                else
-                {
-                    var updatedUserFriendsList = userAccount.Friends.ToList();
-                    updatedUserFriendsList.Add(friendUsername);
-                    userAccount.Friends = updatedUserFriendsList.ToArray();
+                    return new JsonResult(new { message = "Friend request already sent." });
                 }
 
-                if (friendAccount.Friends == null)
+                if (userAccount.IncomingFriendRequests != null && userAccount.IncomingFriendRequests.Contains(friendUsername))
                 {
-                    friendAccount.Friends = [username];
+                    return new JsonResult(new { message = "This user has already sent you a friend request. Please accept it." });
                 }
-                else
-                {
-                    var updatedFriendFriendsList = friendAccount.Friends.ToList();
-                    updatedFriendFriendsList.Add(username);
-                    friendAccount.Friends = updatedFriendFriendsList.ToArray();
-                }
+
+
+                var outgoingList = userAccount.OutgoingFriendRequests?.ToList() ?? new List<string>();
+                outgoingList.Add(friendUsername);
+                userAccount.OutgoingFriendRequests = outgoingList.ToArray();
+
+
+                var incomingList = friendAccount.IncomingFriendRequests?.ToList() ?? new List<string>();
+                incomingList.Add(username);
+                friendAccount.IncomingFriendRequests = incomingList.ToArray();
 
                 _context.SaveChanges();
 
-                return new JsonResult(new { message = "Friend added successfully." });
+                return new JsonResult(new { message = "Friend request sent successfully." });
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"couldnt add friend: {ex.Message}");
-                return new JsonResult(new { message = "Error adding friend." });
+                Console.WriteLine($"couldnt add friend request: {ex.Message}");
+                return new JsonResult(new { message = "Error sending friend request." });
+            }
+        }
+
+        [HttpPost]
+        public JsonResult AcceptFriendRequest(string username, string friendUsername)
+        {
+            try
+            {
+                var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
+
+                if (userAccount == null || friendAccount == null) return new JsonResult(new { message = "Account not found" });
+
+
+                if (userAccount.IncomingFriendRequests == null || !userAccount.IncomingFriendRequests.Contains(friendUsername))
+                {
+                    return new JsonResult(new { message = "No friend request found from this user." });
+                }
+
+
+                var userIncoming = userAccount.IncomingFriendRequests.ToList();
+                userIncoming.Remove(friendUsername);
+                userAccount.IncomingFriendRequests = userIncoming.ToArray();
+
+                var friendOutgoing = friendAccount.OutgoingFriendRequests?.ToList() ?? new List<string>();
+                friendOutgoing.Remove(username);
+                friendAccount.OutgoingFriendRequests = friendOutgoing.ToArray();
+
+
+                var userFriends = userAccount.Friends?.ToList() ?? new List<string>();
+                userFriends.Add(friendUsername);
+                userAccount.Friends = userFriends.ToArray();
+
+                var friendFriends = friendAccount.Friends?.ToList() ?? new List<string>();
+                friendFriends.Add(username);
+                friendAccount.Friends = friendFriends.ToArray();
+
+                _context.SaveChanges();
+                return new JsonResult(new { message = "Friend request accepted." });
+            }
+            catch (Exception ex)
+            {
+                 Console.WriteLine($"Error accepting friend: {ex.Message}");
+                 return new JsonResult(new { message = "Error accepting friend request." });
+            }
+        }
+
+        [HttpPost]
+        public JsonResult DeclineFriendRequest(string username, string friendUsername)
+        {
+            try
+            {
+                var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
+
+                if (userAccount == null || friendAccount == null) return new JsonResult(new { message = "Account not found" });
+
+
+                if (userAccount.IncomingFriendRequests != null && userAccount.IncomingFriendRequests.Contains(friendUsername))
+                {
+                    var userIncoming = userAccount.IncomingFriendRequests.ToList();
+                    userIncoming.Remove(friendUsername);
+                    userAccount.IncomingFriendRequests = userIncoming.ToArray();
+                }
+
+                if (friendAccount.OutgoingFriendRequests != null && friendAccount.OutgoingFriendRequests.Contains(username))
+                {
+                    var friendOutgoing = friendAccount.OutgoingFriendRequests.ToList();
+                    friendOutgoing.Remove(username);
+                    friendAccount.OutgoingFriendRequests = friendOutgoing.ToArray();
+                }
+
+                _context.SaveChanges();
+                return new JsonResult(new { message = "Friend request declined." });
+            }
+            catch (Exception ex)
+            {
+                 Console.WriteLine($"Error declining friend: {ex.Message}");
+                 return new JsonResult(new { message = "Error declining friend request." });
+            }
+        }
+
+        [HttpGet]
+        public JsonResult GetFriendRequests(string username)
+        {
+            try
+            {
+                var account = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                if (account == null) return new JsonResult("User not found");
+
+                return new JsonResult(account.IncomingFriendRequests ?? new string[0]);
+            }
+            catch (Exception ex)
+            {
+                return new JsonResult("Internal server error");
             }
         }
         [HttpGet]
