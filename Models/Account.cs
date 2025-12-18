@@ -10,6 +10,8 @@ namespace DiscordCloneServer.Models
         public string UserName { get; set; }
         public string PassWord { get; set; }
         public string[]? Friends { get; set; }
+        public string[]? IncomingFriendRequests { get; set; }
+        public string[]? OutgoingFriendRequests { get; set; }
 
     }
 }

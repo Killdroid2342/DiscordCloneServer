@@ -5,6 +5,9 @@ using DiscordCloneServer.Data;
 using DiscordCloneServer.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.SignalR;
+
+using DiscordCloneServer.Hubs;
 
 namespace DiscordCloneServer.Controllers
 {
@@ -29,11 +32,13 @@ namespace DiscordCloneServer.Controllers
     {
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
+        private readonly IHubContext<ChatHub> _hubContext;
 
-        public ServerController(ApiContext context, IConfiguration config)
+        public ServerController(ApiContext context, IConfiguration config, IHubContext<ChatHub> hubContext)
         {
             _context = context;
             _config = config;
+            _hubContext = hubContext;
         }
 
 
@@ -182,6 +187,9 @@ namespace DiscordCloneServer.Controllers
 
             _context.ServerMembers.Add(membership);
             await _context.SaveChangesAsync();
+
+
+            await _hubContext.Clients.Group(server.ServerID).SendAsync("NewMember", req.Username);
 
             return Ok(server);
         }
