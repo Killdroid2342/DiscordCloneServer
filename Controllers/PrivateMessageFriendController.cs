@@ -38,6 +38,13 @@ namespace DiscordCloneServer.Controllers
             var messages = _context.PrivateMessageFriends
                 .Where(pm => (pm.MessagesUserSender == currentUsername && pm.MessageUserReciver == targetUsername) ||
                              (pm.MessagesUserSender == targetUsername && pm.MessageUserReciver == currentUsername))
+                .AsEnumerable() 
+                .OrderBy(pm => 
+                {
+                    DateTime dt;
+                    if (DateTime.TryParse(pm.Date, out dt)) return dt;
+                    return DateTime.MinValue;
+                })
                 .ToList();
 
             return new JsonResult(messages);
