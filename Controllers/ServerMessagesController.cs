@@ -29,7 +29,16 @@ namespace DiscordCloneServer.Controllers
         {
             try
             {
-                var messages = _context.ServerMessages.Where(msg => msg.ChannelId == channelId).ToList();
+                var messages = _context.ServerMessages
+                    .Where(msg => msg.ChannelId == channelId)
+                    .AsEnumerable()
+                    .OrderBy(msg => 
+                    {
+                        DateTime dt;
+                        if (DateTime.TryParse(msg.Date, out dt)) return dt;
+                        return DateTime.MinValue; 
+                    })
+                    .ToList();
                 return new JsonResult(messages);
             }
             catch (Exception ex)
