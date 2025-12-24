@@ -13,6 +13,8 @@ namespace DiscordCloneServer.Data
         public DbSet<ServerMember> ServerMembers { get; set; }
         public DbSet<Channel> Channels { get; set; }
         public DbSet<Category> Categories { get; set; }
+        public DbSet<GroupChat> GroupChats { get; set; }
+        public DbSet<GroupMessage> GroupMessages { get; set; }
 
         public ApiContext(DbContextOptions<ApiContext> options)
             : base(options)
@@ -43,6 +45,22 @@ namespace DiscordCloneServer.Data
                     v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
                     v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
                 );
+            modelBuilder.Entity<Account>()
+                .Property(a => a.Groups)
+                .HasConversion(
+                    v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
+                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
+                );
+
+            modelBuilder.Entity<GroupChat>().ToTable("GroupChats");
+            modelBuilder.Entity<GroupChat>()
+                .Property(g => g.Members)
+                .HasConversion(
+                    v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
+                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
+                );
+            modelBuilder.Entity<GroupMessage>().ToTable("GroupMessages");
+
             modelBuilder.Entity<CreateServer>().ToTable("Create_Server");
             modelBuilder.Entity<ServerMessage>().ToTable("Server_Message");
             modelBuilder.Entity<PrivateMessageFriend>().ToTable("Private_Message_Friend");

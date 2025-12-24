@@ -57,6 +57,9 @@ namespace DiscordCloneServer.Migrations
                     b.Property<string>("Friends")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("Groups")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("IncomingFriendRequests")
                         .HasColumnType("nvarchar(max)");
 
@@ -117,6 +120,55 @@ namespace DiscordCloneServer.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("Channels", (string)null);
+                });
+
+            modelBuilder.Entity("DiscordCloneServer.Models.GroupChat", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Members")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Owner")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("GroupChats", (string)null);
+                });
+
+            modelBuilder.Entity("DiscordCloneServer.Models.GroupMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Date")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("GroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Sender")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("GroupMessages", (string)null);
                 });
 
             modelBuilder.Entity("DiscordCloneServer.Models.PrivateMessageFriend", b =>
