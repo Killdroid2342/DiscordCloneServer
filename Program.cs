@@ -65,6 +65,18 @@ namespace DiscordCloneServer
             {
                 var app = builder.Build();
                 app.UseWebSockets();
+                
+                string wwwrootPath = Path.Combine(builder.Environment.ContentRootPath, "wwwroot");
+                if (!Directory.Exists(wwwrootPath))
+                {
+                    Directory.CreateDirectory(wwwrootPath);
+                }
+
+                app.UseStaticFiles(new StaticFileOptions
+                {
+                    FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(wwwrootPath),
+                    RequestPath = ""
+                });
 
                 if (app.Environment.IsDevelopment())
                 {
