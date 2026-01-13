@@ -33,7 +33,7 @@ namespace DiscordCloneServer
 
             builder.Services.AddDbContext<ApiContext>
                 (opt => opt.UseSqlServer(
-                    "Server=localhost\\SQLEXPRESS;Database=DiscordClone;Trusted_Connection=True;Encrypt=False;TrustServerCertificate=True",
+                    builder.Configuration.GetConnectionString("DefaultConnection"),
                     opt => opt.EnableRetryOnFailure()
                 ));
 

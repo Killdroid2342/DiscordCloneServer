@@ -84,8 +84,8 @@ namespace DiscordCloneServer.Controllers
                     _context.PrivateMessageFriends.Add(privateMessage);
                     _context.SaveChanges();
 
-                    if (_activeSockets.TryGetValue(privateMessage.MessageUserReciver, out WebSocket receiverSocket) &&
-                        receiverSocket.State == WebSocketState.Open)
+                    if (privateMessage.MessageUserReciver != null && _activeSockets.TryGetValue(privateMessage.MessageUserReciver, out WebSocket? receiverSocket) &&
+                        receiverSocket != null && receiverSocket.State == WebSocketState.Open)
                     {
                         var messageBuffer = Encoding.UTF8.GetBytes(messageJson);
                         await receiverSocket.SendAsync(new ArraySegment<byte>(messageBuffer), WebSocketMessageType.Text, true, CancellationToken.None);

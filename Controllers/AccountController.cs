@@ -63,7 +63,8 @@ namespace DiscordCloneServer.Controllers
                 if (_context.Accounts.Any(a => a.UserName == account.UserName && a.PassWord == account.PassWord))
                 {
                     Console.WriteLine("login worked");
-                    var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]));
+                    if (string.IsNullOrEmpty(_config["Jwt:Key"])) throw new InvalidOperationException("Jwt:Key is missing");
+                    var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]!));
                     var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
                     var claims = new List<Claim>
@@ -72,7 +73,7 @@ namespace DiscordCloneServer.Controllers
                     };
 
                     var token = new JwtSecurityToken(
-                        _config["Jwt:Issuer"],
+                        _config["Jwt:Issuer"]!,
                         null,
                         claims: claims,
                         expires: DateTime.Now.AddDays(14),
@@ -105,7 +106,8 @@ namespace DiscordCloneServer.Controllers
             try
             {
                 Console.WriteLine($"checking token: {token}");
-                var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]));
+                if (string.IsNullOrEmpty(_config["Jwt:Key"])) throw new InvalidOperationException("Jwt:Key is missing");
+                var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]!));
 
                 var tokenHandler = new JwtSecurityTokenHandler();
                 Console.WriteLine($"token handler: {tokenHandler}");
@@ -271,7 +273,7 @@ namespace DiscordCloneServer.Controllers
 
                 return new JsonResult(account.IncomingFriendRequests ?? new string[0]);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 return new JsonResult("Internal server error");
             }
@@ -285,7 +287,7 @@ namespace DiscordCloneServer.Controllers
 
                 if (account != null)
                 {
-                    if (!account.Friends.Any())
+                    if (account.Friends == null || !account.Friends.Any())
                         return new JsonResult("No Friends Added!");
 
                     return new JsonResult(account.Friends);
@@ -296,7 +298,7 @@ namespace DiscordCloneServer.Controllers
                 }
 
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 return new JsonResult("Internal server error");
             }

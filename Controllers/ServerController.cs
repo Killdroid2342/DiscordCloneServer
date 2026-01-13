@@ -100,7 +100,7 @@ namespace DiscordCloneServer.Controllers
                 .ToList();
 
             var servers = await _context.CreateServers
-                .Where(server => memberServerIds.Contains(server.ServerID) || server.ServerOwner == username)
+                .Where(server => memberServerIds.Contains(server.ServerID ?? "") || server.ServerOwner == username)
                 .ToListAsync();
 
             if (servers.Any())
@@ -180,7 +180,7 @@ namespace DiscordCloneServer.Controllers
             var membership = new ServerMember
             {
                 Id = Guid.NewGuid().ToString(),
-                ServerId = server.ServerID,
+                ServerId = server.ServerID ?? throw new InvalidOperationException("ServerID is null"),
                 Username = req.Username,
                 Role = "user"
             };
@@ -189,7 +189,7 @@ namespace DiscordCloneServer.Controllers
             await _context.SaveChangesAsync();
 
 
-            await _hubContext.Clients.Group(server.ServerID).SendAsync("NewMember", req.Username);
+            await _hubContext.Clients.Group(server.ServerID ?? "defaultString").SendAsync("NewMember", req.Username);
 
             return Ok(server);
         }

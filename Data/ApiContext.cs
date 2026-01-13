@@ -23,42 +23,52 @@ namespace DiscordCloneServer.Data
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
+            var stringArrayComparer = new Microsoft.EntityFrameworkCore.ChangeTracking.ValueComparer<string[]>(
+                (c1, c2) => c1 != null && c2 != null && c1.SequenceEqual(c2),
+                c => c.Aggregate(0, (a, v) => HashCode.Combine(a, v.GetHashCode())),
+                c => c.ToArray());
+
             modelBuilder.Entity<Account>().ToTable("Accounts");
          
             modelBuilder.Entity<Account>()
                 .Property(a => a.Friends)
                 .HasConversion(
                     v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
-                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
-                );
+                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions?)null) ?? Array.Empty<string>()
+                )
+                .Metadata.SetValueComparer(stringArrayComparer);
 
             modelBuilder.Entity<Account>()
                 .Property(a => a.IncomingFriendRequests)
                 .HasConversion(
                     v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
-                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
-                );
+                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions?)null) ?? Array.Empty<string>()
+                )
+                .Metadata.SetValueComparer(stringArrayComparer);
 
             modelBuilder.Entity<Account>()
                 .Property(a => a.OutgoingFriendRequests)
                 .HasConversion(
                     v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
-                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
-                );
+                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions?)null) ?? Array.Empty<string>()
+                )
+                .Metadata.SetValueComparer(stringArrayComparer);
             modelBuilder.Entity<Account>()
                 .Property(a => a.Groups)
                 .HasConversion(
                     v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
-                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
-                );
+                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions?)null) ?? Array.Empty<string>()
+                )
+                .Metadata.SetValueComparer(stringArrayComparer);
 
             modelBuilder.Entity<GroupChat>().ToTable("GroupChats");
             modelBuilder.Entity<GroupChat>()
                 .Property(g => g.Members)
                 .HasConversion(
                     v => System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions)null),
-                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions)null)
-                );
+                    v => System.Text.Json.JsonSerializer.Deserialize<string[]>(v, (System.Text.Json.JsonSerializerOptions?)null) ?? Array.Empty<string>()
+                )
+                .Metadata.SetValueComparer(stringArrayComparer);
             modelBuilder.Entity<GroupMessage>().ToTable("GroupMessages");
 
             modelBuilder.Entity<CreateServer>().ToTable("Create_Server");

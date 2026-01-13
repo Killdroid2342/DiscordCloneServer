@@ -116,7 +116,7 @@ namespace DiscordCloneServer.Controllers
                     using (JsonDocument doc = JsonDocument.Parse(messageJson))
                     {
                         JsonElement root = doc.RootElement;
-                        string type = root.TryGetProperty("Type", out var typeProp) ? typeProp.GetString() : "chat";
+                        string type = root.TryGetProperty("Type", out var typeProp) ? (typeProp.GetString() ?? "chat") : "chat";
 
                         if (type == "chat")
                         {
@@ -132,7 +132,7 @@ namespace DiscordCloneServer.Controllers
                                 {
                                     foreach (var member in group.Members.Distinct())
                                     {
-                                        if (_activeSockets.TryGetValue(member, out WebSocket socket) && socket.State == WebSocketState.Open)
+                                        if (member != null && _activeSockets.TryGetValue(member, out WebSocket? socket) && socket != null && socket.State == WebSocketState.Open)
                                         {
                                             var msgBuffer = Encoding.UTF8.GetBytes(messageJson); 
                                             await socket.SendAsync(new ArraySegment<byte>(msgBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
@@ -143,12 +143,12 @@ namespace DiscordCloneServer.Controllers
                         }
                         else 
                         {
-                            string targetUser = root.TryGetProperty("TargetUser", out var targetProp) ? targetProp.GetString() : null;
-                            string groupIdStr = root.TryGetProperty("GroupId", out var groupProp) ? groupProp.GetString() : null;
+                            string? targetUser = root.TryGetProperty("TargetUser", out var targetProp) ? targetProp.GetString() : null;
+                            string? groupIdStr = root.TryGetProperty("GroupId", out var groupProp) ? groupProp.GetString() : null;
 
                             if (!string.IsNullOrEmpty(targetUser))
                             {
-                                if (_activeSockets.TryGetValue(targetUser, out WebSocket socket) && socket.State == WebSocketState.Open)
+                                if (_activeSockets.TryGetValue(targetUser, out WebSocket? socket) && socket != null && socket.State == WebSocketState.Open)
                                 {
                                      var msgBuffer = Encoding.UTF8.GetBytes(messageJson);
                                      await socket.SendAsync(new ArraySegment<byte>(msgBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
@@ -161,7 +161,7 @@ namespace DiscordCloneServer.Controllers
                                 {
                                     foreach (var member in group.Members.Distinct())
                                     {
-                                         if (_activeSockets.TryGetValue(member, out WebSocket socket) && socket.State == WebSocketState.Open)
+                                         if (member != null && _activeSockets.TryGetValue(member, out WebSocket? socket) && socket != null && socket.State == WebSocketState.Open)
                                         {
                                             var msgBuffer = Encoding.UTF8.GetBytes(messageJson);
                                             await socket.SendAsync(new ArraySegment<byte>(msgBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
