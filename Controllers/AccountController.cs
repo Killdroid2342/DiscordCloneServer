@@ -25,35 +25,44 @@ namespace DiscordCloneServer.Controllers
         [HttpPost]
         public JsonResult CreateAccount(Account account)
         {
-            if (account.Id == 0)
+            try
             {
-                if (_context.Accounts.Any(a => a.UserName == account.UserName))
+                if (account.Id == 0)
                 {
-                    return new JsonResult(new { message = "Username already exists." });
+                    if (_context.Accounts.Any(a => a.UserName == account.UserName))
+                    {
+                        return new JsonResult(new { message = "Username already exists." });
+                    }
+
+                    _context.Accounts.Add(account);
+                    _context.SaveChanges();
+                    return new JsonResult(new { message = "Created Account" });
+                }
+                else
+                {
+                    var accountInDb = _context.Accounts.Find(account.Id);
+                    if (accountInDb == null)
+                    {
+                        return new JsonResult(new { message = "Account not found." });
+                    }
+
+                    if (_context.Accounts.Any(a => a.UserName == account.UserName && a.Id != account.Id))
+                    {
+                        return new JsonResult(new { message = "Username already exists." });
+                    }
+
+                    accountInDb.UserName = account.UserName;
                 }
 
-                _context.Accounts.Add(account);
                 _context.SaveChanges();
-                return new JsonResult(new { message = "Created Account" });
+                return new JsonResult(account);
             }
-            else
+            catch (Exception ex)
             {
-                var accountInDb = _context.Accounts.Find(account.Id);
-                if (accountInDb == null)
-                {
-                    return new JsonResult(new { message = "Account not found." });
-                }
-
-                if (_context.Accounts.Any(a => a.UserName == account.UserName && a.Id != account.Id))
-                {
-                    return new JsonResult(new { message = "Username already exists." });
-                }
-
-                accountInDb.UserName = account.UserName;
+                Console.WriteLine($"CreateAccount broke: {ex}");
+                HttpContext.Response.StatusCode = 500;
+                return new JsonResult(new { message = "Database connection error." });
             }
-
-            _context.SaveChanges();
-            return new JsonResult(account);
         }
         [HttpPost]
         public JsonResult LogIn(Account account)
@@ -95,8 +104,9 @@ namespace DiscordCloneServer.Controllers
             catch (Exception e)
             {
                 Console.WriteLine($"login broke: {e}");
+                HttpContext.Response.StatusCode = 500;
+                return new JsonResult(new { message = "Database connection error." });
             }
-            return new JsonResult(account);
         }
 
 
@@ -345,6 +355,115 @@ namespace DiscordCloneServer.Controllers
                 return new JsonResult(new { message = "Error removing friend." });
             }
         }
+        [HttpGet]
+        public JsonResult GetAccountTheme(string username)
+        {
+            try
+            {
+                var account = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                if (account == null)
+                {
+                    return new JsonResult(new { message = "Account not found." });
+                }
+
+                return new JsonResult(new 
+                { 
+                    backgroundColor = account.BackgroundColor, 
+                    textColor = account.TextColor 
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldnt get theme: {ex.Message}");
+                return new JsonResult(new { message = "Error getting theme." });
+            }
+        }
+
+        [HttpPost]
+        public JsonResult UpdateAccountTheme([FromBody] ThemeUpdateRequest request)
+        {
+            try
+            {
+                var account = _context.Accounts.FirstOrDefault(a => a.UserName == request.Username);
+                if (account == null)
+                {
+                    return new JsonResult(new { message = "Account not found." });
+                }
+
+                account.BackgroundColor = request.BackgroundColor;
+                account.TextColor = request.TextColor;
+
+                _context.SaveChanges();
+                return new JsonResult(new { message = "Theme updated successfully." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldnt update theme: {ex.Message}");
+                return new JsonResult(new { message = "Error updating theme." });
+            }
+        }
+
+        [HttpGet]
+        public JsonResult GetAccountProfile(string username)
+        {
+            try
+            {
+                var account = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                if (account == null)
+                {
+                    return new JsonResult(new { message = "Account not found." });
+                }
+
+                return new JsonResult(new 
+                { 
+                    profilePictureUrl = account.ProfilePictureUrl, 
+                    description = account.Description 
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldnt get profile: {ex.Message}");
+                return new JsonResult(new { message = "Error getting profile." });
+            }
+        }
+
+        [HttpPost]
+        public JsonResult UpdateAccountProfile([FromBody] ProfileUpdateRequest request)
+        {
+            try
+            {
+                var account = _context.Accounts.FirstOrDefault(a => a.UserName == request.Username);
+                if (account == null)
+                {
+                    return new JsonResult(new { message = "Account not found." });
+                }
+
+                account.ProfilePictureUrl = request.ProfilePictureUrl;
+                account.Description = request.Description;
+
+                _context.SaveChanges();
+                return new JsonResult(new { message = "Profile updated successfully." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldnt update profile: {ex.Message}");
+                return new JsonResult(new { message = "Error updating profile." });
+            }
+        }
+    }
+
+    public class ThemeUpdateRequest
+    {
+        public string Username { get; set; }
+        public string? BackgroundColor { get; set; }
+        public string? TextColor { get; set; }
+    }
+
+    public class ProfileUpdateRequest
+    {
+        public string Username { get; set; }
+        public string? ProfilePictureUrl { get; set; }
+        public string? Description { get; set; }
     }
 }
 
