@@ -13,6 +13,10 @@ namespace DiscordCloneServer.Models
         public string[]? IncomingFriendRequests { get; set; }
         public string[]? OutgoingFriendRequests { get; set; }
         public string[]? Groups { get; set; }
+        public string? BackgroundColor { get; set; }
+        public string? TextColor { get; set; }
+        public string? ProfilePictureUrl { get; set; }
+        public string? Description { get; set; }
 
     }
 }
