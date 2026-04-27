@@ -1,10 +1,11 @@
-using System.Configuration;
 using System.Text;
 using DiscordCloneServer.Data;
+using DiscordCloneServer.Services;
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using System.Threading.RateLimiting;
 
 namespace DiscordCloneServer
 {
@@ -14,7 +15,16 @@ namespace DiscordCloneServer
         {
             var builder = WebApplication.CreateBuilder(args);
 
-            var MyAllowSpecificOrigins = "_myAllowSpecificOrigins";
+            const string MyAllowSpecificOrigins = "_myAllowSpecificOrigins";
+            var allowedOrigins = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "http://127.0.0.1:5500",
+                "http://127.0.0.1:3300",
+                "https://localhost:7170",
+                "http://127.0.0.1:8080",
+                "http://localhost:8080",
+                "null"
+            };
 
 
             builder.Services.AddCors(options =>
@@ -22,11 +32,11 @@ namespace DiscordCloneServer
                 options.AddPolicy(name: MyAllowSpecificOrigins,
                     policy =>
                     {
-                        policy.WithOrigins("http://127.0.0.1:5500", "https://localhost:7170", "http://127.0.0.1:8080", "http://localhost:8080")
+                        policy.WithOrigins(allowedOrigins.Where(origin => origin != "null").ToArray())
                             .AllowCredentials()
                             .AllowAnyHeader()
                             .AllowAnyMethod()
-                            .SetIsOriginAllowed(_ => true);
+                            .SetIsOriginAllowed(origin => IsAllowedCorsOrigin(origin, allowedOrigins));
                     });
 
             });
@@ -39,6 +49,10 @@ namespace DiscordCloneServer
 
             var jwtIssuer = builder.Configuration.GetSection("Jwt:Issuer").Get<string>();
             var jwtKey = builder.Configuration.GetSection("Jwt:Key").Get<string>();
+            if (string.IsNullOrWhiteSpace(jwtIssuer) || string.IsNullOrWhiteSpace(jwtKey))
+            {
+                throw new InvalidOperationException("Jwt:Issuer and Jwt:Key must be configured. Store Jwt:Key in user secrets or the JWT__KEY environment variable, not appsettings.json.");
+            }
 
             builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
              .AddJwtBearer(options =>
@@ -51,10 +65,107 @@ namespace DiscordCloneServer
                      ValidateIssuerSigningKey = true,
                      ValidIssuer = jwtIssuer,
                      ValidAudience = jwtIssuer,
-                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+                     ClockSkew = TimeSpan.FromMinutes(2)
+                 };
+                 options.Events = new JwtBearerEvents
+                 {
+                     OnMessageReceived = context =>
+                     {
+                         if (string.IsNullOrWhiteSpace(context.Token) &&
+                             context.Request.Query.TryGetValue("access_token", out var accessToken))
+                         {
+                             context.Token = accessToken;
+                         }
+
+                         if (string.IsNullOrWhiteSpace(context.Token) &&
+                             context.Request.Cookies.TryGetValue("token", out var cookieToken))
+                         {
+                             context.Token = cookieToken;
+                         }
+
+                         return Task.CompletedTask;
+                     },
+                     OnTokenValidated = async context =>
+                     {
+                         var username = context.Principal?.GetUsername();
+                         var sessionId = context.Principal?.GetSessionId();
+                         if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(sessionId))
+                         {
+                             context.Fail("Missing session claim.");
+                             return;
+                         }
+
+                         var db = context.HttpContext.RequestServices.GetRequiredService<ApiContext>();
+                         var session = await db.AccountSessions
+                             .FirstOrDefaultAsync(s => s.Id == sessionId && s.Username == username);
+                         var account = await db.Accounts
+                             .FirstOrDefaultAsync(a => a.UserName == username);
+
+                         if (session == null || account == null || account.IsDisabled ||
+                             session.RevokedAt != null || session.ExpiresAt <= DateTime.UtcNow)
+                         {
+                             context.Fail("Session is no longer active.");
+                             return;
+                         }
+
+                         session.LastSeenAt = DateTime.UtcNow;
+                         await db.SaveChangesAsync();
+                     }
                  };
              });
             builder.Services.AddControllers();
+            builder.Services.AddRateLimiter(options =>
+            {
+                options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+                options.OnRejected = async (context, cancellationToken) =>
+                {
+                    context.HttpContext.Response.ContentType = "application/json";
+                    await context.HttpContext.Response.WriteAsync(
+                        "{\"message\":\"Too many requests. Please slow down and try again shortly.\"}",
+                        cancellationToken);
+                };
+
+                options.AddPolicy("auth", httpContext =>
+                    RateLimitPartition.GetFixedWindowLimiter(
+                        GetClientPartitionKey(httpContext, "auth"),
+                        _ => new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = 8,
+                            Window = TimeSpan.FromMinutes(1),
+                            QueueLimit = 0
+                        }));
+
+                options.AddPolicy("friend", httpContext =>
+                    RateLimitPartition.GetFixedWindowLimiter(
+                        GetClientPartitionKey(httpContext, "friend"),
+                        _ => new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = 30,
+                            Window = TimeSpan.FromMinutes(1),
+                            QueueLimit = 0
+                        }));
+
+                options.AddPolicy("upload", httpContext =>
+                    RateLimitPartition.GetFixedWindowLimiter(
+                        GetClientPartitionKey(httpContext, "upload"),
+                        _ => new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = 12,
+                            Window = TimeSpan.FromMinutes(1),
+                            QueueLimit = 0
+                        }));
+
+                options.AddPolicy("abuse", httpContext =>
+                    RateLimitPartition.GetFixedWindowLimiter(
+                        GetClientPartitionKey(httpContext, "abuse"),
+                        _ => new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = 120,
+                            Window = TimeSpan.FromMinutes(1),
+                            QueueLimit = 0
+                        }));
+            });
 
             
             builder.Services.AddEndpointsApiExplorer();
@@ -88,6 +199,7 @@ namespace DiscordCloneServer
                 app.UseCors(MyAllowSpecificOrigins);
 
                 app.UseAuthentication();
+                app.UseRateLimiter();
                 app.UseAuthorization();
 
                 using (var scope = app.Services.CreateScope())
@@ -105,6 +217,11 @@ namespace DiscordCloneServer
             }
             catch (Exception ex)
             {
+                if (ex.GetType().Name == "HostAbortedException")
+                {
+                    throw;
+                }
+
                 Console.WriteLine($"server startup failed: {ex.Message}");
                 Console.WriteLine($"error info: {ex.StackTrace}");
                 throw;
@@ -112,6 +229,38 @@ namespace DiscordCloneServer
 
 
 
+        }
+
+        private static bool IsAllowedCorsOrigin(string? origin, ISet<string> allowedOrigins)
+        {
+            if (string.IsNullOrWhiteSpace(origin) || allowedOrigins.Contains(origin))
+            {
+                return true;
+            }
+
+            if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri))
+            {
+                return false;
+            }
+
+            var isLoopbackHost =
+                uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+                uri.Host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+                uri.Host.Equals("::1", StringComparison.OrdinalIgnoreCase);
+
+            return isLoopbackHost && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+        }
+
+        private static string GetClientPartitionKey(HttpContext httpContext, string policyName)
+        {
+            var username = httpContext.User.GetUsername();
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                return $"{policyName}:user:{username}";
+            }
+
+            var ipAddress = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            return $"{policyName}:ip:{ipAddress}";
         }
 
     }
