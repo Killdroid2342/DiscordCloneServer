@@ -6,9 +6,10 @@ namespace DiscordCloneServer.Models
     {
         [Key]
         public string Id { get; set; } = Guid.NewGuid().ToString();
-        public string ServerId { get; set; }
+        public string ServerId { get; set; } = string.Empty;
         public string? CategoryId { get; set; }
-        public string Name { get; set; }
-        public string Type { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public string Type { get; set; } = string.Empty;
+        public int Position { get; set; }
     }
 }

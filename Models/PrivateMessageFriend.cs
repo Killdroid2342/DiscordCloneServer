@@ -6,10 +6,14 @@ namespace DiscordCloneServer.Models
     {
         [Key]
         public string PrivateMessageID { get; set; } = Guid.NewGuid().ToString();
-        public string FriendMessagesData { get; set; }
-        public string MessageUserReciver { get; set; }
-        public string MessagesUserSender { get; set; }
-        public string Date { get; set; }
+        public string FriendMessagesData { get; set; } = string.Empty;
+        public string MessageUserReciver { get; set; } = string.Empty;
+        public string MessagesUserSender { get; set; } = string.Empty;
+        public string Date { get; set; } = string.Empty;
+        public string? ReplyToMessageId { get; set; }
+        public string? AttachmentUrl { get; set; }
+        public string? AttachmentContentType { get; set; }
+        public DateTime? EditedAt { get; set; }
 
     }
 }

@@ -7,8 +7,12 @@ namespace DiscordCloneServer.Models
         [Key]
         public Guid Id { get; set; }
         public Guid GroupId { get; set; }
-        public string Sender { get; set; }
-        public string Content { get; set; }
-        public string Date { get; set; }
+        public string Sender { get; set; } = string.Empty;
+        public string Content { get; set; } = string.Empty;
+        public string Date { get; set; } = string.Empty;
+        public Guid? ReplyToMessageId { get; set; }
+        public string? AttachmentUrl { get; set; }
+        public string? AttachmentContentType { get; set; }
+        public DateTime? EditedAt { get; set; }
     }
 }

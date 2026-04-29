@@ -5,11 +5,17 @@ public class CreateServer
     [Key]
     public string? ServerID { get; set; }
     [Required]
-    public string ServerName { get; set; }
+    public string ServerName { get; set; } = string.Empty;
 
     [Required]
-    public string ServerOwner { get; set; }
+    public string ServerOwner { get; set; } = string.Empty;
 
     public string? InviteLink { get; set; }
     public DateTime? Date { get; set; }
+    public string? Description { get; set; }
+    public string VerificationLevel { get; set; } = "none";
+    public bool RequireVerifiedEmail { get; set; }
+    public int MinimumAccountAgeMinutes { get; set; }
+    public int MinimumMembershipMinutes { get; set; }
+    public bool RequireTwoFactorForModerators { get; set; }
 }

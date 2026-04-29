@@ -2,8 +2,8 @@
 {
     public class SignalMessage
     {
-        public string Type { get; set; }
-        public string From { get; set; }
-        public string Data { get; set; }
+        public string Type { get; set; } = string.Empty;
+        public string From { get; set; } = string.Empty;
+        public string Data { get; set; } = string.Empty;
     }
 }
