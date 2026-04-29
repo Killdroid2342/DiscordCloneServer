@@ -1,15 +1,32 @@
 using Microsoft.AspNetCore.SignalR;
 using System.Collections.Concurrent;
+using DiscordCloneServer.Controllers;
+using DiscordCloneServer.Data;
+using DiscordCloneServer.Services;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.EntityFrameworkCore;
 
 namespace DiscordCloneServer.Hubs
 {
+    [Authorize]
     public class ChatHub : Hub
     {
         private static readonly ConcurrentDictionary<string, HashSet<string>> ServerConnections = new();
         private static readonly ConcurrentDictionary<string, string> UserConnections = new();
+        private readonly ApiContext _context;
+
+        public ChatHub(ApiContext context)
+        {
+            _context = context;
+        }
 
         public async Task JoinServer(string serverId, string username)
         {
+            username = Context.User?.GetUsername() ?? throw new HubException("Missing user identity.");
+            if (!await IsServerMember(serverId, username))
+            {
+                throw new HubException("You are not a member of this server.");
+            }
         
             UserConnections[Context.ConnectionId] = username;
             
@@ -23,6 +40,11 @@ namespace DiscordCloneServer.Hubs
             
     
             await Groups.AddToGroupAsync(Context.ConnectionId, serverId);
+            await Clients.Caller.SendAsync(
+                "VoiceUsersUpdated",
+                serverId,
+                VoiceWebSocketController.GetActiveUsersForServer(serverId)
+            );
             
     
             if (isNewUser)
@@ -37,6 +59,11 @@ namespace DiscordCloneServer.Hubs
 
         public async Task LeaveServer(string serverId, string username)
         {
+            username = Context.User?.GetUsername() ?? throw new HubException("Missing user identity.");
+            if (!await IsServerMember(serverId, username))
+            {
+                throw new HubException("You are not a member of this server.");
+            }
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, serverId);
             
             if (ServerConnections.TryGetValue(serverId, out var connections))
@@ -56,6 +83,11 @@ namespace DiscordCloneServer.Hubs
 
         public async Task SendMessage(string serverId, string username, string message, string date)
         {
+            username = Context.User?.GetUsername() ?? throw new HubException("Missing user identity.");
+            if (!await IsServerMember(serverId, username))
+            {
+                throw new HubException("You are not a member of this server.");
+            }
     
             await Clients.Group(serverId).SendAsync("ReceiveMessage", username, message, date);
         }
@@ -81,6 +113,12 @@ namespace DiscordCloneServer.Hubs
             }
             
             await base.OnDisconnectedAsync(exception);
+        }
+
+        private async Task<bool> IsServerMember(string serverId, string username)
+        {
+            return await _context.ServerMembers.AnyAsync(member =>
+                member.ServerId == serverId && member.Username == username);
         }
     }
 }
