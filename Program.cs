@@ -115,6 +115,7 @@ namespace DiscordCloneServer
                  };
              });
             builder.Services.AddControllers();
+            builder.Services.AddHttpClient<IContactVerificationDelivery, ContactVerificationDelivery>();
             builder.Services.AddRateLimiter(options =>
             {
                 options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
