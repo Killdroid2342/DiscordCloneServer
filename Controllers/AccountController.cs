@@ -1,8 +1,16 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using DiscordCloneServer.Data;
+using DiscordCloneServer.Models;
+using DiscordCloneServer.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Account = DiscordCloneServer.Models.Account;
 
@@ -10,460 +18,2420 @@ namespace DiscordCloneServer.Controllers
 {
     [Route("api/[controller]/[action]")]
     [ApiController]
+    [Authorize]
     public class AccountController : ControllerBase
     {
+        private const int AccessTokenHours = 24;
+        private const int RefreshTokenDays = 30;
+        private const int PasswordResetMinutes = 30;
+        private const int TwoFactorLoginMinutes = 5;
+        private const int BackupCodeCount = 10;
+        private const int BackupCodeCharacters = 10;
+        private const int MaxSettingsJsonBytes = 32768;
+        private const string DeletedUserName = "Deleted User";
+        private const string Base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+        private static readonly Regex UsernameRegex = new("^[A-Za-z0-9_.-]{3,32}$", RegexOptions.Compiled);
+        private static readonly Regex PhoneRegex = new(@"^\+?[0-9 .()\-]{7,32}$", RegexOptions.Compiled);
+        private static readonly HashSet<string> PresenceStatuses = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "online",
+            "idle",
+            "do-not-disturb",
+            "invisible"
+        };
+        private static readonly HashSet<string> DmPolicies = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "everyone",
+            "friends",
+            "none"
+        };
+
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
+        private readonly IContactVerificationDelivery? _verificationDelivery;
 
-        public AccountController(ApiContext context, IConfiguration config)
+        public AccountController(
+            ApiContext context,
+            IConfiguration config,
+            IContactVerificationDelivery? verificationDelivery = null)
         {
             _context = context;
             _config = config;
+            _verificationDelivery = verificationDelivery;
         }
 
-
         [HttpPost]
-        public JsonResult CreateAccount(Account account)
+        [AllowAnonymous]
+        [EnableRateLimiting("auth")]
+        public IActionResult CreateAccount([FromBody] Account account)
         {
             try
             {
-                if (account.Id == 0)
+                if (account.Id != 0)
                 {
-                    if (_context.Accounts.Any(a => a.UserName == account.UserName))
-                    {
-                        return new JsonResult(new { message = "Username already exists." });
-                    }
-
-                    _context.Accounts.Add(account);
-                    _context.SaveChanges();
-                    return new JsonResult(new { message = "Created Account" });
-                }
-                else
-                {
-                    var accountInDb = _context.Accounts.Find(account.Id);
-                    if (accountInDb == null)
-                    {
-                        return new JsonResult(new { message = "Account not found." });
-                    }
-
-                    if (_context.Accounts.Any(a => a.UserName == account.UserName && a.Id != account.Id))
-                    {
-                        return new JsonResult(new { message = "Username already exists." });
-                    }
-
-                    accountInDb.UserName = account.UserName;
+                    return BadRequest(new { message = "Use the authenticated profile endpoints to update an account." });
                 }
 
+                var username = NormalizeUsername(account.UserName);
+                var password = account.PassWord?.Trim() ?? string.Empty;
+
+                if (!IsValidUsername(username))
+                {
+                    return BadRequest(new { message = "Username must be 3-32 characters and use only letters, numbers, dots, underscores, or hyphens." });
+                }
+
+                if (!IsValidPassword(password))
+                {
+                    return BadRequest(new { message = "Password must be 8-128 characters and include at least one letter and one number." });
+                }
+
+                if (UsernameExists(username))
+                {
+                    return Conflict(new { message = "Username already exists." });
+                }
+
+                account.UserName = username;
+                account.PassWord = PasswordHasher.HashPassword(password);
+                account.CreatedAt = DateTime.UtcNow;
+                account.PasswordUpdatedAt = DateTime.UtcNow;
+                account.Friends = Array.Empty<string>();
+                account.IncomingFriendRequests = Array.Empty<string>();
+                account.OutgoingFriendRequests = Array.Empty<string>();
+                account.Groups = Array.Empty<string>();
+                account.BlockedUsers = Array.Empty<string>();
+                account.PresenceStatus = "online";
+                account.PrivacyDmPolicy = "friends";
+                account.PrivacyAllowFriendRequestsEveryone = true;
+                account.PrivacyAllowFriendRequestsFriendsOfFriends = true;
+                account.PrivacyAllowFriendRequestsServerMembers = true;
+                account.PrivacyShowActivity = true;
+                account.SettingsJson = "{}";
+                account.VoiceChangerSettingsJson = "{}";
+                account.IsDisabled = false;
+                account.PasswordResetTokenHash = null;
+                account.PasswordResetExpiresAt = null;
+                account.TwoFactorEnabled = false;
+                account.AuthenticatorSecretProtected = null;
+                account.TwoFactorBackupCodeHashes = Array.Empty<string>();
+                account.TwoFactorLoginTicketHash = null;
+                account.TwoFactorLoginTicketExpiresAt = null;
+
+                _context.Accounts.Add(account);
                 _context.SaveChanges();
-                return new JsonResult(account);
+                return Ok(new { message = "Created Account" });
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"CreateAccount broke: {ex}");
-                HttpContext.Response.StatusCode = 500;
-                return new JsonResult(new { message = "Database connection error." });
+                return StatusCode(500, new { message = "Database connection error." });
             }
         }
+
         [HttpPost]
-        public JsonResult LogIn(Account account)
+        [AllowAnonymous]
+        [EnableRateLimiting("auth")]
+        public IActionResult LogIn([FromBody] Account account)
         {
             try
             {
-                if (_context.Accounts.Any(a => a.UserName == account.UserName && a.PassWord == account.PassWord))
-                {
-                    Console.WriteLine("login worked");
-                    if (string.IsNullOrEmpty(_config["Jwt:Key"])) throw new InvalidOperationException("Jwt:Key is missing");
-                    var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]!));
-                    var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
+                var username = NormalizeUsername(account.UserName);
+                var suppliedPassword = account.PassWord ?? string.Empty;
+                var accountInDb = _context.Accounts.FirstOrDefault(a => a.UserName == username);
 
-                    var claims = new List<Claim>
+                if (accountInDb == null)
+                {
+                    return Unauthorized(new { message = "Wrong Details" });
+                }
+
+                var passwordResult = PasswordHasher.VerifyPassword(accountInDb.PassWord, suppliedPassword);
+                if (passwordResult == PasswordVerificationResult.Failed)
+                {
+                    return Unauthorized(new { message = "Wrong Details" });
+                }
+
+                if (passwordResult == PasswordVerificationResult.SuccessRehashNeeded)
+                {
+                    accountInDb.PassWord = PasswordHasher.HashPassword(suppliedPassword);
+                    accountInDb.PasswordUpdatedAt = DateTime.UtcNow;
+                }
+
+                var wasDisabled = accountInDb.IsDisabled;
+                if (wasDisabled)
+                {
+                    accountInDb.IsDisabled = false;
+                }
+
+                accountInDb.PasswordResetTokenHash = null;
+                accountInDb.PasswordResetExpiresAt = null;
+
+                if (accountInDb.TwoFactorEnabled)
+                {
+                    var ticket = GenerateOpaqueToken();
+                    accountInDb.TwoFactorLoginTicketHash = HashToken(ticket);
+                    accountInDb.TwoFactorLoginTicketExpiresAt = DateTime.UtcNow.AddMinutes(TwoFactorLoginMinutes);
+                    _context.SaveChanges();
+
+                    return Ok(new
                     {
-                        new Claim("username", account.UserName)
-                    };
-
-                    var token = new JwtSecurityToken(
-                        _config["Jwt:Issuer"]!,
-                        null,
-                        claims: claims,
-                        expires: DateTime.Now.AddDays(14),
-                        signingCredentials: credentials
-                    );
-
-                    var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
-                    Console.WriteLine($"made token: {tokenString}");
-
-                    return new JsonResult(new { message = "Correct Details", token = tokenString });
-
+                        message = "Two-factor authentication required.",
+                        twoFactorRequired = true,
+                        twoFactorTicket = ticket,
+                        expiresAt = accountInDb.TwoFactorLoginTicketExpiresAt,
+                        username = accountInDb.UserName
+                    });
                 }
-                else
+
+                var login = CreateSession(accountInDb);
+                _context.SaveChanges();
+                SetRefreshCookie(login.RefreshToken);
+
+                return Ok(new
                 {
-                    Console.WriteLine("wrong login info");
-                    return new JsonResult(new { message = "Wrong Details" });
-                }
+                    message = wasDisabled ? "Account re-enabled." : "Correct Details",
+                    token = login.AccessToken,
+                    refreshToken = login.RefreshToken,
+                    expiresAt = login.AccessTokenExpiresAt,
+                    sessionId = login.SessionId
+                });
             }
             catch (Exception e)
             {
                 Console.WriteLine($"login broke: {e}");
-                HttpContext.Response.StatusCode = 500;
-                return new JsonResult(new { message = "Database connection error." });
-            }
-        }
-
-
-        [HttpPost]
-        public JsonResult VerifyToken(string token)
-        {
-            try
-            {
-                Console.WriteLine($"checking token: {token}");
-                if (string.IsNullOrEmpty(_config["Jwt:Key"])) throw new InvalidOperationException("Jwt:Key is missing");
-                var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]!));
-
-                var tokenHandler = new JwtSecurityTokenHandler();
-                Console.WriteLine($"token handler: {tokenHandler}");
-                tokenHandler.ValidateToken(token, new TokenValidationParameters
-                {
-                    ValidateIssuer = true,
-                    ValidateAudience = false,
-                    ValidateLifetime = true,
-                    ValidateIssuerSigningKey = true,
-                    ValidIssuer = _config["Jwt:Issuer"],
-                    IssuerSigningKey = securityKey
-                }, out var validatedToken);
-
-                Console.WriteLine("token is good");
-                return new JsonResult(new { message = "Token is correct." });
-            }
-            catch (Exception)
-            {
-                Console.WriteLine("token is bad");
-                return new JsonResult(new { message = "Token is not correct." });
+                return StatusCode(500, new { message = "Database connection error." });
             }
         }
 
         [HttpPost]
-        public JsonResult AddFriend(string username, string friendUsername)
+        [AllowAnonymous]
+        [EnableRateLimiting("auth")]
+        public IActionResult CompleteTwoFactorLogin([FromBody] TwoFactorLoginRequest request)
         {
             try
             {
-                if (username == friendUsername)
+                var username = NormalizeUsername(request.Username);
+                var account = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                if (account == null ||
+                    account.IsDisabled ||
+                    !account.TwoFactorEnabled ||
+                    string.IsNullOrWhiteSpace(request.TwoFactorTicket) ||
+                    string.IsNullOrWhiteSpace(account.TwoFactorLoginTicketHash) ||
+                    account.TwoFactorLoginTicketExpiresAt <= DateTime.UtcNow ||
+                    !FixedTimeEquals(account.TwoFactorLoginTicketHash, HashToken(request.TwoFactorTicket)))
                 {
-                    return new JsonResult(new { message = "You cannot add yourself as a friend." });
+                    return Unauthorized(new { message = "Two-factor challenge is invalid or expired." });
                 }
 
-                var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
-                var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
+                if (!TryValidateTwoFactorCode(account, request.Code, consumeBackupCode: true))
+                {
+                    return Unauthorized(new { message = "Two-factor code is invalid." });
+                }
+
+                account.TwoFactorLoginTicketHash = null;
+                account.TwoFactorLoginTicketExpiresAt = null;
+
+                var login = CreateSession(account);
+                _context.SaveChanges();
+                SetRefreshCookie(login.RefreshToken);
+
+                return Ok(new
+                {
+                    message = "Correct Details",
+                    token = login.AccessToken,
+                    refreshToken = login.RefreshToken,
+                    expiresAt = login.AccessTokenExpiresAt,
+                    sessionId = login.SessionId
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"2fa login failed: {ex}");
+                return StatusCode(500, new { message = "Could not complete two-factor login." });
+            }
+        }
+
+        [HttpPost]
+        [AllowAnonymous]
+        public IActionResult VerifyToken(string? token = null)
+        {
+            try
+            {
+                token = string.IsNullOrWhiteSpace(token) ? ReadAccessTokenFromRequest() : token;
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    return Unauthorized(new { message = "Token is not correct." });
+                }
+
+                var validation = ValidateAccessTokenAndSession(token);
+                if (!validation.IsValid)
+                {
+                    return Unauthorized(new { message = "Token is not correct." });
+                }
+
+                return Ok(new { message = "Token is correct." });
+            }
+            catch
+            {
+                return Unauthorized(new { message = "Token is not correct." });
+            }
+        }
+
+        [HttpPost]
+        [AllowAnonymous]
+        [EnableRateLimiting("auth")]
+        public IActionResult Refresh([FromBody] RefreshTokenRequest? request = null)
+        {
+            try
+            {
+                var refreshToken = request?.RefreshToken;
+                if (string.IsNullOrWhiteSpace(refreshToken))
+                {
+                    refreshToken = HttpContext?.Request.Cookies["refreshToken"];
+                }
+
+                if (string.IsNullOrWhiteSpace(refreshToken))
+                {
+                    return Unauthorized(new { message = "Refresh token is required." });
+                }
+
+                var refreshHash = HashToken(refreshToken);
+                var session = _context.AccountSessions
+                    .FirstOrDefault(s => s.RefreshTokenHash == refreshHash);
+
+                if (session == null || session.RevokedAt != null || session.ExpiresAt <= DateTime.UtcNow)
+                {
+                    return Unauthorized(new { message = "Session is no longer active." });
+                }
+
+                var account = _context.Accounts.FirstOrDefault(a => a.Id == session.AccountId && a.UserName == session.Username);
+                if (account == null || account.IsDisabled)
+                {
+                    return Unauthorized(new { message = "Account is no longer active." });
+                }
+
+                var replacement = CreateSession(account);
+                session.RevokedAt = DateTime.UtcNow;
+                session.ReplacedBySessionId = replacement.SessionId;
+                _context.SaveChanges();
+                SetRefreshCookie(replacement.RefreshToken);
+
+                return Ok(new
+                {
+                    message = "Session refreshed.",
+                    token = replacement.AccessToken,
+                    refreshToken = replacement.RefreshToken,
+                    expiresAt = replacement.AccessTokenExpiresAt,
+                    sessionId = replacement.SessionId
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"refresh failed: {ex}");
+                return StatusCode(500, new { message = "Could not refresh session." });
+            }
+        }
+
+        [HttpPost]
+        public IActionResult Logout()
+        {
+            try
+            {
+                RevokeCurrentSession();
+                ClearAuthCookies();
+                _context.SaveChanges();
+                return Ok(new { message = "Logged out." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"logout failed: {ex}");
+                return StatusCode(500, new { message = "Could not log out." });
+            }
+        }
+
+        [HttpPost]
+        public IActionResult LogoutAll()
+        {
+            try
+            {
+                var username = GetCurrentUsername();
+                if (username == null)
+                {
+                    return Unauthorized(new { message = "Missing user identity." });
+                }
+
+                RevokeSessionsForUsername(username);
+                ClearAuthCookies();
+                _context.SaveChanges();
+                return Ok(new { message = "All sessions have been logged out." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"logout all failed: {ex}");
+                return StatusCode(500, new { message = "Could not log out sessions." });
+            }
+        }
+
+        [HttpGet]
+        public IActionResult GetSessions()
+        {
+            var username = GetCurrentUsername();
+            if (username == null)
+            {
+                return Unauthorized(new { message = "Missing user identity." });
+            }
+
+            var currentSessionId = User.GetSessionId();
+            var sessions = _context.AccountSessions
+                .Where(s => s.Username == username && s.ExpiresAt > DateTime.UtcNow)
+                .OrderByDescending(s => s.LastSeenAt)
+                .Select(s => new
+                {
+                    s.Id,
+                    s.CreatedAt,
+                    s.ExpiresAt,
+                    s.LastSeenAt,
+                    s.RevokedAt,
+                    s.UserAgent,
+                    s.IpAddress,
+                    IsCurrent = s.Id == currentSessionId,
+                    IsActive = s.RevokedAt == null
+                })
+                .ToList();
+
+            return Ok(sessions);
+        }
+
+        [HttpPost]
+        [AllowAnonymous]
+        [EnableRateLimiting("auth")]
+        public IActionResult RequestPasswordReset([FromBody] PasswordResetRequest request)
+        {
+            try
+            {
+                var username = NormalizeUsername(request.Username);
+                var account = _context.Accounts.FirstOrDefault(a => a.UserName == username && !a.IsDisabled);
+                string? resetToken = null;
+
+                if (account != null)
+                {
+                    resetToken = GenerateOpaqueToken();
+                    account.PasswordResetTokenHash = HashToken(resetToken);
+                    account.PasswordResetExpiresAt = DateTime.UtcNow.AddMinutes(PasswordResetMinutes);
+                    _context.SaveChanges();
+                }
+
+                var response = new Dictionary<string, object?>
+                {
+                    ["message"] = "If that account exists, a password reset token has been created."
+                };
+
+                if (resetToken != null && _config.GetValue<bool>("Account:ExposePasswordResetToken"))
+                {
+                    response["resetToken"] = resetToken;
+                }
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"password reset request failed: {ex}");
+                return StatusCode(500, new { message = "Could not request a password reset." });
+            }
+        }
+
+        [HttpPost]
+        [AllowAnonymous]
+        [EnableRateLimiting("auth")]
+        public IActionResult ResetPassword([FromBody] ResetPasswordRequest request)
+        {
+            try
+            {
+                var username = NormalizeUsername(request.Username);
+                var account = _context.Accounts.FirstOrDefault(a => a.UserName == username && !a.IsDisabled);
+                if (account == null ||
+                    string.IsNullOrWhiteSpace(request.Token) ||
+                    string.IsNullOrWhiteSpace(account.PasswordResetTokenHash) ||
+                    account.PasswordResetExpiresAt <= DateTime.UtcNow ||
+                    !FixedTimeEquals(account.PasswordResetTokenHash, HashToken(request.Token)))
+                {
+                    return BadRequest(new { message = "Password reset token is invalid or expired." });
+                }
+
+                if (!IsValidPassword(request.NewPassword))
+                {
+                    return BadRequest(new { message = "Password must be 8-128 characters and include at least one letter and one number." });
+                }
+
+                account.PassWord = PasswordHasher.HashPassword(request.NewPassword);
+                account.PasswordUpdatedAt = DateTime.UtcNow;
+                account.PasswordResetTokenHash = null;
+                account.PasswordResetExpiresAt = null;
+                RevokeSessionsForUsername(account.UserName);
+                _context.SaveChanges();
+
+                return Ok(new { message = "Password reset successfully. Please log in again." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"password reset failed: {ex}");
+                return StatusCode(500, new { message = "Could not reset password." });
+            }
+        }
+
+        [HttpPost]
+        public IActionResult ChangePassword([FromBody] ChangePasswordRequest request)
+        {
+            try
+            {
+                var account = GetCurrentAccount();
+                if (account == null)
+                {
+                    return NotFound(new { message = "Account not found." });
+                }
+
+                if (PasswordHasher.VerifyPassword(account.PassWord, request.CurrentPassword) == PasswordVerificationResult.Failed)
+                {
+                    return BadRequest(new { message = "Current password is incorrect." });
+                }
+
+                if (!IsValidPassword(request.NewPassword))
+                {
+                    return BadRequest(new { message = "New password must be 8-128 characters and include at least one letter and one number." });
+                }
+
+                if (request.CurrentPassword == request.NewPassword)
+                {
+                    return BadRequest(new { message = "Use a new password that is different from the current one." });
+                }
+
+                account.PassWord = PasswordHasher.HashPassword(request.NewPassword);
+                account.PasswordUpdatedAt = DateTime.UtcNow;
+                account.PasswordResetTokenHash = null;
+                account.PasswordResetExpiresAt = null;
+                RevokeOtherSessionsForCurrentUser();
+                _context.SaveChanges();
+
+                return Ok(new { message = "Password changed successfully." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"change password failed: {ex}");
+                return StatusCode(500, new { message = "Could not change password." });
+            }
+        }
+
+        [HttpPost]
+        public IActionResult DisableAccount([FromBody] AccountPasswordRequest request)
+        {
+            try
+            {
+                var account = GetCurrentAccount();
+                if (account == null)
+                {
+                    return NotFound(new { message = "Account not found." });
+                }
+
+                if (PasswordHasher.VerifyPassword(account.PassWord, request.Password) == PasswordVerificationResult.Failed)
+                {
+                    return BadRequest(new { message = "Password is incorrect." });
+                }
+
+                account.IsDisabled = true;
+                RevokeSessionsForUsername(account.UserName);
+                ClearAuthCookies();
+                _context.SaveChanges();
+                return Ok(new { message = "Account disabled. Log in again to recover it." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"disable account failed: {ex}");
+                return StatusCode(500, new { message = "Could not disable account." });
+            }
+        }
+
+        [HttpPost]
+        public IActionResult DeleteAccount([FromBody] AccountPasswordRequest request)
+        {
+            try
+            {
+                var account = GetCurrentAccount();
+                if (account == null)
+                {
+                    return NotFound(new { message = "Account not found." });
+                }
+
+                if (PasswordHasher.VerifyPassword(account.PassWord, request.Password) == PasswordVerificationResult.Failed)
+                {
+                    return BadRequest(new { message = "Password is incorrect." });
+                }
+
+                CleanupDeletedAccount(account);
+                _context.Accounts.Remove(account);
+                ClearAuthCookies();
+                _context.SaveChanges();
+
+                return Ok(new { message = "Account deleted." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"delete account failed: {ex}");
+                return StatusCode(500, new { message = "Could not delete account." });
+            }
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("friend")]
+        public IActionResult AddFriend(string friendUsername)
+        {
+            try
+            {
+                var currentUsername = GetCurrentUsername();
+                if (currentUsername == null)
+                {
+                    return Unauthorized(new { message = "Missing user identity." });
+                }
+
+                friendUsername = NormalizeUsername(friendUsername);
+
+                if (string.Equals(currentUsername, friendUsername, StringComparison.OrdinalIgnoreCase))
+                {
+                    return BadRequest(new { message = "You cannot add yourself as a friend." });
+                }
+
+                var userAccount = FindActiveAccount(currentUsername);
+                var friendAccount = FindActiveAccount(friendUsername);
                 if (userAccount == null || friendAccount == null)
                 {
-                    return new JsonResult(new { message = "Account not found." });
+                    return NotFound(new { message = "Account not found." });
                 }
 
-                if (userAccount.Friends != null && userAccount.Friends.Contains(friendUsername))
+                if (ContainsValue(userAccount.BlockedUsers, friendUsername) ||
+                    ContainsValue(friendAccount.BlockedUsers, currentUsername))
                 {
-                    return new JsonResult(new { message = "Friend already added." });
+                    return Forbid();
                 }
 
-                if (userAccount.OutgoingFriendRequests != null && userAccount.OutgoingFriendRequests.Contains(friendUsername))
+                if (!CanReceiveFriendRequest(friendAccount, userAccount))
                 {
-                    return new JsonResult(new { message = "Friend request already sent." });
+                    return Forbid();
                 }
 
-                if (userAccount.IncomingFriendRequests != null && userAccount.IncomingFriendRequests.Contains(friendUsername))
+                if (ContainsValue(userAccount.Friends, friendUsername))
                 {
-                    return new JsonResult(new { message = "This user has already sent you a friend request. Please accept it." });
+                    return Conflict(new { message = "Friend already added." });
                 }
 
+                if (ContainsValue(userAccount.OutgoingFriendRequests, friendUsername))
+                {
+                    return Conflict(new { message = "Friend request already sent." });
+                }
 
-                var outgoingList = userAccount.OutgoingFriendRequests?.ToList() ?? new List<string>();
-                outgoingList.Add(friendUsername);
-                userAccount.OutgoingFriendRequests = outgoingList.ToArray();
+                if (ContainsValue(userAccount.IncomingFriendRequests, friendUsername))
+                {
+                    return Conflict(new { message = "This user has already sent you a friend request. Please accept it." });
+                }
 
-
-                var incomingList = friendAccount.IncomingFriendRequests?.ToList() ?? new List<string>();
-                incomingList.Add(username);
-                friendAccount.IncomingFriendRequests = incomingList.ToArray();
+                userAccount.OutgoingFriendRequests = AddUnique(userAccount.OutgoingFriendRequests, friendUsername);
+                friendAccount.IncomingFriendRequests = AddUnique(friendAccount.IncomingFriendRequests, currentUsername);
 
                 _context.SaveChanges();
 
-                return new JsonResult(new { message = "Friend request sent successfully." });
+                return Ok(new { message = "Friend request sent successfully." });
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"couldnt add friend request: {ex.Message}");
-                return new JsonResult(new { message = "Error sending friend request." });
+                return StatusCode(500, new { message = "Error sending friend request." });
             }
         }
 
         [HttpPost]
-        public JsonResult AcceptFriendRequest(string username, string friendUsername)
+        [EnableRateLimiting("friend")]
+        public IActionResult AcceptFriendRequest(string friendUsername)
         {
             try
             {
-                var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
-                var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
-
-                if (userAccount == null || friendAccount == null) return new JsonResult(new { message = "Account not found" });
-
-
-                if (userAccount.IncomingFriendRequests == null || !userAccount.IncomingFriendRequests.Contains(friendUsername))
+                var currentUsername = GetCurrentUsername();
+                if (currentUsername == null)
                 {
-                    return new JsonResult(new { message = "No friend request found from this user." });
+                    return Unauthorized(new { message = "Missing user identity." });
                 }
 
-
-                var userIncoming = userAccount.IncomingFriendRequests.ToList();
-                userIncoming.Remove(friendUsername);
-                userAccount.IncomingFriendRequests = userIncoming.ToArray();
-
-                var friendOutgoing = friendAccount.OutgoingFriendRequests?.ToList() ?? new List<string>();
-                friendOutgoing.Remove(username);
-                friendAccount.OutgoingFriendRequests = friendOutgoing.ToArray();
-
-
-                var userFriends = userAccount.Friends?.ToList() ?? new List<string>();
-                userFriends.Add(friendUsername);
-                userAccount.Friends = userFriends.ToArray();
-
-                var friendFriends = friendAccount.Friends?.ToList() ?? new List<string>();
-                friendFriends.Add(username);
-                friendAccount.Friends = friendFriends.ToArray();
-
-                _context.SaveChanges();
-                return new JsonResult(new { message = "Friend request accepted." });
-            }
-            catch (Exception ex)
-            {
-                 Console.WriteLine($"Error accepting friend: {ex.Message}");
-                 return new JsonResult(new { message = "Error accepting friend request." });
-            }
-        }
-
-        [HttpPost]
-        public JsonResult DeclineFriendRequest(string username, string friendUsername)
-        {
-            try
-            {
-                var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
-                var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
-
-                if (userAccount == null || friendAccount == null) return new JsonResult(new { message = "Account not found" });
-
-
-                if (userAccount.IncomingFriendRequests != null && userAccount.IncomingFriendRequests.Contains(friendUsername))
-                {
-                    var userIncoming = userAccount.IncomingFriendRequests.ToList();
-                    userIncoming.Remove(friendUsername);
-                    userAccount.IncomingFriendRequests = userIncoming.ToArray();
-                }
-
-                if (friendAccount.OutgoingFriendRequests != null && friendAccount.OutgoingFriendRequests.Contains(username))
-                {
-                    var friendOutgoing = friendAccount.OutgoingFriendRequests.ToList();
-                    friendOutgoing.Remove(username);
-                    friendAccount.OutgoingFriendRequests = friendOutgoing.ToArray();
-                }
-
-                _context.SaveChanges();
-                return new JsonResult(new { message = "Friend request declined." });
-            }
-            catch (Exception ex)
-            {
-                 Console.WriteLine($"Error declining friend: {ex.Message}");
-                 return new JsonResult(new { message = "Error declining friend request." });
-            }
-        }
-
-        [HttpGet]
-        public JsonResult GetFriendRequests(string username)
-        {
-            try
-            {
-                var account = _context.Accounts.FirstOrDefault(a => a.UserName == username);
-                if (account == null) return new JsonResult("User not found");
-
-                return new JsonResult(account.IncomingFriendRequests ?? new string[0]);
-            }
-            catch (Exception)
-            {
-                return new JsonResult("Internal server error");
-            }
-        }
-        [HttpGet]
-        public JsonResult GetFriends(string username)
-        {
-            try
-            {
-                var account = _context.Accounts.FirstOrDefault(account => account.UserName == username);
-
-                if (account != null)
-                {
-                    if (account.Friends == null || !account.Friends.Any())
-                        return new JsonResult("No Friends Added!");
-
-                    return new JsonResult(account.Friends);
-                }
-                else
-                {
-                    return new JsonResult("User not found");
-                }
-
-            }
-            catch (Exception)
-            {
-                return new JsonResult("Internal server error");
-            }
-        }
-
-        [HttpPost]
-        public JsonResult RemoveFriend(string username, string friendUsername)
-        {
-            try
-            {
-                var userAccount = _context.Accounts.FirstOrDefault(a => a.UserName == username);
-                var friendAccount = _context.Accounts.FirstOrDefault(a => a.UserName == friendUsername);
+                friendUsername = NormalizeUsername(friendUsername);
+                var userAccount = FindActiveAccount(currentUsername);
+                var friendAccount = FindActiveAccount(friendUsername);
 
                 if (userAccount == null || friendAccount == null)
                 {
-                    return new JsonResult(new { message = "Account not found." });
+                    return NotFound(new { message = "Account not found" });
                 }
 
-                if (userAccount.Friends != null && userAccount.Friends.Contains(friendUsername))
+                if (!ContainsValue(userAccount.IncomingFriendRequests, friendUsername))
                 {
-                    var userFriendsList = userAccount.Friends.ToList();
-                    userFriendsList.Remove(friendUsername);
-                    userAccount.Friends = userFriendsList.ToArray();
-
-                    if (friendAccount.Friends != null && friendAccount.Friends.Contains(username))
-                    {
-                        var friendFriendsList = friendAccount.Friends.ToList();
-                        friendFriendsList.Remove(username);
-                        friendAccount.Friends = friendFriendsList.ToArray();
-                    }
-
-                    _context.SaveChanges();
-
-                    return new JsonResult(new { message = "Friend removed successfully." });
+                    return NotFound(new { message = "No friend request found from this user." });
                 }
-                else
+
+                userAccount.IncomingFriendRequests = RemoveValue(userAccount.IncomingFriendRequests, friendUsername);
+                friendAccount.OutgoingFriendRequests = RemoveValue(friendAccount.OutgoingFriendRequests, currentUsername);
+                userAccount.Friends = AddUnique(userAccount.Friends, friendUsername);
+                friendAccount.Friends = AddUnique(friendAccount.Friends, currentUsername);
+
+                _context.SaveChanges();
+                return Ok(new { message = "Friend request accepted." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error accepting friend: {ex.Message}");
+                return StatusCode(500, new { message = "Error accepting friend request." });
+            }
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("friend")]
+        public IActionResult DeclineFriendRequest(string friendUsername)
+        {
+            try
+            {
+                var currentUsername = GetCurrentUsername();
+                if (currentUsername == null)
                 {
-                    return new JsonResult(new { message = "Friend not found in user's friend list." });
+                    return Unauthorized(new { message = "Missing user identity." });
                 }
+
+                friendUsername = NormalizeUsername(friendUsername);
+                var userAccount = FindActiveAccount(currentUsername);
+                var friendAccount = FindActiveAccount(friendUsername);
+
+                if (userAccount == null || friendAccount == null)
+                {
+                    return NotFound(new { message = "Account not found" });
+                }
+
+                userAccount.IncomingFriendRequests = RemoveValue(userAccount.IncomingFriendRequests, friendUsername);
+                friendAccount.OutgoingFriendRequests = RemoveValue(friendAccount.OutgoingFriendRequests, currentUsername);
+
+                _context.SaveChanges();
+                return Ok(new { message = "Friend request declined." });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error declining friend: {ex.Message}");
+                return StatusCode(500, new { message = "Error declining friend request." });
+            }
+        }
+
+        [HttpGet]
+        public IActionResult GetFriendRequests()
+        {
+            try
+            {
+                var account = GetCurrentAccount();
+                if (account == null) return NotFound(new { message = "User not found" });
+
+                return Ok(account.IncomingFriendRequests ?? Array.Empty<string>());
+            }
+            catch
+            {
+                return StatusCode(500, new { message = "Internal server error" });
+            }
+        }
+
+        [HttpGet]
+        public IActionResult GetFriends()
+        {
+            try
+            {
+                var account = GetCurrentAccount();
+                if (account == null)
+                {
+                    return NotFound(new { message = "User not found" });
+                }
+
+                return Ok(account.Friends ?? Array.Empty<string>());
+            }
+            catch
+            {
+                return StatusCode(500, new { message = "Internal server error" });
+            }
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("friend")]
+        public IActionResult RemoveFriend(string friendUsername)
+        {
+            try
+            {
+                var currentUsername = GetCurrentUsername();
+                if (currentUsername == null)
+                {
+                    return Unauthorized(new { message = "Missing user identity." });
+                }
+
+                friendUsername = NormalizeUsername(friendUsername);
+                var userAccount = FindActiveAccount(currentUsername);
+                var friendAccount = FindActiveAccount(friendUsername);
+
+                if (userAccount == null || friendAccount == null)
+                {
+                    return NotFound(new { message = "Account not found." });
+                }
+
+                if (!ContainsValue(userAccount.Friends, friendUsername))
+                {
+                    return NotFound(new { message = "Friend not found in user's friend list." });
+                }
+
+                userAccount.Friends = RemoveValue(userAccount.Friends, friendUsername);
+                friendAccount.Friends = RemoveValue(friendAccount.Friends, currentUsername);
+                _context.SaveChanges();
+
+                return Ok(new { message = "Friend removed successfully." });
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"couldnt remove friend: {ex.Message}");
-                return new JsonResult(new { message = "Error removing friend." });
+                return StatusCode(500, new { message = "Error removing friend." });
             }
         }
+
         [HttpGet]
-        public JsonResult GetAccountTheme(string username)
+        public IActionResult GetAccountTheme()
         {
             try
             {
-                var account = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                var account = GetCurrentAccount();
                 if (account == null)
                 {
-                    return new JsonResult(new { message = "Account not found." });
+                    return NotFound(new { message = "Account not found." });
                 }
 
-                return new JsonResult(new 
-                { 
-                    backgroundColor = account.BackgroundColor, 
-                    textColor = account.TextColor 
+                return Ok(new
+                {
+                    backgroundColor = account.BackgroundColor,
+                    textColor = account.TextColor
                 });
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"couldnt get theme: {ex.Message}");
-                return new JsonResult(new { message = "Error getting theme." });
+                return StatusCode(500, new { message = "Error getting theme." });
             }
         }
 
         [HttpPost]
-        public JsonResult UpdateAccountTheme([FromBody] ThemeUpdateRequest request)
+        public IActionResult UpdateAccountTheme([FromBody] ThemeUpdateRequest request)
         {
             try
             {
-                var account = _context.Accounts.FirstOrDefault(a => a.UserName == request.Username);
+                var account = GetCurrentAccount();
                 if (account == null)
                 {
-                    return new JsonResult(new { message = "Account not found." });
+                    return NotFound(new { message = "Account not found." });
+                }
+
+                if (!IsValidHexColor(request.BackgroundColor) || !IsValidHexColor(request.TextColor))
+                {
+                    return BadRequest(new { message = "Theme colors must be valid hex colors." });
                 }
 
                 account.BackgroundColor = request.BackgroundColor;
                 account.TextColor = request.TextColor;
 
                 _context.SaveChanges();
-                return new JsonResult(new { message = "Theme updated successfully." });
+                return Ok(new { message = "Theme updated successfully." });
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"couldnt update theme: {ex.Message}");
-                return new JsonResult(new { message = "Error updating theme." });
+                return StatusCode(500, new { message = "Error updating theme." });
             }
         }
 
         [HttpGet]
-        public JsonResult GetAccountProfile(string username)
+        public IActionResult GetAccountProfile(string username)
         {
             try
             {
-                var account = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+                var account = FindActiveAccount(username);
                 if (account == null)
                 {
-                    return new JsonResult(new { message = "Account not found." });
+                    return NotFound(new { message = "Account not found." });
                 }
 
-                return new JsonResult(new 
-                { 
-                    profilePictureUrl = account.ProfilePictureUrl, 
-                    description = account.Description 
+                return Ok(new
+                {
+                    profilePictureUrl = account.ProfilePictureUrl,
+                    profileBannerUrl = account.ProfileBannerUrl,
+                    profileBannerColor = account.ProfileBannerColor,
+                    description = account.Description,
+                    presenceStatus = account.PresenceStatus,
+                    showActivity = account.PrivacyShowActivity
                 });
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"couldnt get profile: {ex.Message}");
-                return new JsonResult(new { message = "Error getting profile." });
+                return StatusCode(500, new { message = "Error getting profile." });
             }
         }
 
         [HttpPost]
-        public JsonResult UpdateAccountProfile([FromBody] ProfileUpdateRequest request)
+        public IActionResult UpdateAccountProfile([FromBody] ProfileUpdateRequest request)
         {
             try
             {
-                var account = _context.Accounts.FirstOrDefault(a => a.UserName == request.Username);
+                var account = GetCurrentAccount();
                 if (account == null)
                 {
-                    return new JsonResult(new { message = "Account not found." });
+                    return NotFound(new { message = "Account not found." });
                 }
 
-                account.ProfilePictureUrl = request.ProfilePictureUrl;
-                account.Description = request.Description;
+                var profilePictureUrl = request.ProfilePictureUrl?.Trim() ?? string.Empty;
+                var profileBannerUrl = request.ProfileBannerUrl?.Trim() ?? string.Empty;
+                var profileBannerColor = string.IsNullOrWhiteSpace(request.ProfileBannerColor)
+                    ? "#0c0c0c"
+                    : request.ProfileBannerColor.Trim();
+                var description = request.Description?.Trim() ?? string.Empty;
+
+                if (!IsValidProfileUrl(profilePictureUrl))
+                {
+                    return BadRequest(new { message = "Profile image must be blank, an http URL, or an uploaded file URL." });
+                }
+
+                if (!IsValidProfileUrl(profileBannerUrl))
+                {
+                    return BadRequest(new { message = "Profile banner must be blank, an http URL, or an uploaded file URL." });
+                }
+
+                if (!IsValidHexColor(profileBannerColor))
+                {
+                    return BadRequest(new { message = "Profile banner color must be a valid hex color." });
+                }
+
+                if (description.Length > 280)
+                {
+                    return BadRequest(new { message = "Profile description must be 280 characters or less." });
+                }
+
+                account.ProfilePictureUrl = profilePictureUrl;
+                account.ProfileBannerUrl = profileBannerUrl;
+                account.ProfileBannerColor = profileBannerColor;
+                account.Description = description;
 
                 _context.SaveChanges();
-                return new JsonResult(new { message = "Profile updated successfully." });
+                return Ok(new { message = "Profile updated successfully." });
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"couldnt update profile: {ex.Message}");
-                return new JsonResult(new { message = "Error updating profile." });
+                return StatusCode(500, new { message = "Error updating profile." });
             }
+        }
+
+        [HttpGet]
+        public IActionResult GetAccountSettings()
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            return Ok(BuildAccountSettingsResponse(account));
+        }
+
+        [HttpPost]
+        public IActionResult UpdateAccountSettings([FromBody] AccountSettingsUpdateRequest request)
+        {
+            try
+            {
+                var account = GetCurrentAccount();
+                if (account == null)
+                {
+                    return NotFound(new { message = "Account not found." });
+                }
+
+                if (request.Settings.ValueKind != JsonValueKind.Undefined)
+                {
+                    if (!TryNormalizeJsonObject(request.Settings, out var settingsJson, out var settingsError))
+                    {
+                        return BadRequest(new { message = settingsError });
+                    }
+
+                    account.SettingsJson = settingsJson;
+                }
+
+                if (request.VoiceChangerSettings.ValueKind != JsonValueKind.Undefined)
+                {
+                    if (!TryNormalizeJsonObject(request.VoiceChangerSettings, out var voiceJson, out var voiceError))
+                    {
+                        return BadRequest(new { message = voiceError });
+                    }
+
+                    account.VoiceChangerSettingsJson = voiceJson;
+                }
+
+                _context.SaveChanges();
+                return Ok(BuildAccountSettingsResponse(account));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldnt update account settings: {ex.Message}");
+                return StatusCode(500, new { message = "Error updating settings." });
+            }
+        }
+
+        [HttpPost]
+        public IActionResult UpdateContactInfo([FromBody] ContactInfoUpdateRequest request)
+        {
+            try
+            {
+                var account = GetCurrentAccount();
+                if (account == null)
+                {
+                    return NotFound(new { message = "Account not found." });
+                }
+
+                var email = request.Email?.Trim() ?? string.Empty;
+                var phone = request.PhoneNumber?.Trim() ?? string.Empty;
+
+                if (!string.IsNullOrWhiteSpace(email) && !IsValidEmail(email))
+                {
+                    return BadRequest(new { message = "Email must be a valid email address." });
+                }
+
+                if (!string.IsNullOrWhiteSpace(phone) && !PhoneRegex.IsMatch(phone))
+                {
+                    return BadRequest(new { message = "Phone number must be 7-32 digits and common phone punctuation." });
+                }
+
+                if (!string.IsNullOrWhiteSpace(phone) &&
+                    !IsPhoneVerificationAvailable() &&
+                    !string.Equals(account.PhoneNumber, phone, StringComparison.OrdinalIgnoreCase))
+                {
+                    return BadRequest(new { message = "Phone verification is not available until an SMS provider is configured." });
+                }
+
+                var normalizedEmail = string.IsNullOrWhiteSpace(email) ? null : email;
+                var normalizedPhone = string.IsNullOrWhiteSpace(phone) ? null : phone;
+                if (!string.Equals(account.Email, normalizedEmail, StringComparison.OrdinalIgnoreCase))
+                {
+                    account.EmailVerifiedAt = null;
+                }
+                if (!string.Equals(account.PhoneNumber, normalizedPhone, StringComparison.OrdinalIgnoreCase))
+                {
+                    account.PhoneNumberVerifiedAt = null;
+                }
+
+                account.Email = normalizedEmail;
+                account.PhoneNumber = normalizedPhone;
+                _context.SaveChanges();
+
+                return Ok(BuildAccountSettingsResponse(account));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldnt update contact info: {ex.Message}");
+                return StatusCode(500, new { message = "Error updating contact info." });
+            }
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("auth")]
+        public async Task<IActionResult> RequestEmailVerification([FromBody] ContactVerificationRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            var email = request.Target?.Trim() ?? account.Email?.Trim() ?? string.Empty;
+            if (!IsValidEmail(email))
+            {
+                return BadRequest(new { message = "Email must be a valid email address." });
+            }
+
+            return await StartContactVerification(account, "email", email);
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("auth")]
+        public async Task<IActionResult> ConfirmEmailVerification([FromBody] ContactVerificationConfirmRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            return await ConfirmContactVerification(account, "email", request.Code);
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("auth")]
+        public async Task<IActionResult> RequestPhoneVerification([FromBody] ContactVerificationRequest request)
+        {
+            if (!IsPhoneVerificationAvailable())
+            {
+                return BadRequest(new { message = "Phone verification is not available until an SMS provider is configured." });
+            }
+
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            var phone = request.Target?.Trim() ?? account.PhoneNumber?.Trim() ?? string.Empty;
+            if (!PhoneRegex.IsMatch(phone))
+            {
+                return BadRequest(new { message = "Phone number must be 7-32 digits and common phone punctuation." });
+            }
+
+            return await StartContactVerification(account, "phone", phone);
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("auth")]
+        public async Task<IActionResult> ConfirmPhoneVerification([FromBody] ContactVerificationConfirmRequest request)
+        {
+            if (!IsPhoneVerificationAvailable())
+            {
+                return BadRequest(new { message = "Phone verification is not available until an SMS provider is configured." });
+            }
+
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            return await ConfirmContactVerification(account, "phone", request.Code);
+        }
+
+        [HttpGet]
+        public IActionResult GetTwoFactorStatus()
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            return Ok(BuildTwoFactorStatus(account));
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("auth")]
+        public IActionResult BeginAuthenticatorSetup([FromBody] AuthenticatorSetupRequest? request = null)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            if (account.TwoFactorEnabled)
+            {
+                return BadRequest(new { message = "Authenticator-app 2FA is already enabled." });
+            }
+
+            var secret = GenerateBase32Secret();
+            account.AuthenticatorSecretProtected = ProtectAuthenticatorSecret(secret);
+            account.TwoFactorBackupCodeHashes = account.TwoFactorBackupCodeHashes ?? Array.Empty<string>();
+            _context.SaveChanges();
+
+            var issuer = _config["TwoFactor:Issuer"]?.Trim();
+            if (string.IsNullOrWhiteSpace(issuer))
+            {
+                issuer = "MyDiscord";
+            }
+
+            var label = string.IsNullOrWhiteSpace(request?.Label)
+                ? account.UserName
+                : request.Label.Trim();
+            var otpauthUri =
+                $"otpauth://totp/{Uri.EscapeDataString($"{issuer}:{label}")}?secret={secret}&issuer={Uri.EscapeDataString(issuer)}&digits=6&period=30";
+
+            return Ok(new
+            {
+                secret,
+                manualEntryKey = secret,
+                otpauthUri,
+                issuer,
+                accountName = label
+            });
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("auth")]
+        public IActionResult EnableAuthenticator([FromBody] TwoFactorCodeRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            if (string.IsNullOrWhiteSpace(account.AuthenticatorSecretProtected))
+            {
+                return BadRequest(new { message = "Start authenticator setup before enabling 2FA." });
+            }
+
+            if (!TryValidateAuthenticatorCode(account, request.Code))
+            {
+                return BadRequest(new { message = "Authenticator code is invalid." });
+            }
+
+            var backupCodes = GenerateBackupCodes();
+            account.TwoFactorEnabled = true;
+            account.TwoFactorBackupCodeHashes = backupCodes
+                .Select(code => HashBackupCode(account.UserName, code))
+                .ToArray();
+            account.TwoFactorLoginTicketHash = null;
+            account.TwoFactorLoginTicketExpiresAt = null;
+            _context.SaveChanges();
+
+            return Ok(new
+            {
+                message = "Authenticator-app 2FA enabled.",
+                backupCodes,
+                twoFactor = BuildTwoFactorStatus(account)
+            });
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("auth")]
+        public IActionResult DisableTwoFactor([FromBody] DisableTwoFactorRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            if (!account.TwoFactorEnabled)
+            {
+                return Ok(new { message = "Two-factor authentication is already disabled.", twoFactor = BuildTwoFactorStatus(account) });
+            }
+
+            if (PasswordHasher.VerifyPassword(account.PassWord, request.Password) == PasswordVerificationResult.Failed)
+            {
+                return BadRequest(new { message = "Password is incorrect." });
+            }
+
+            if (!TryValidateTwoFactorCode(account, request.Code, consumeBackupCode: true))
+            {
+                return BadRequest(new { message = "Two-factor code is invalid." });
+            }
+
+            account.TwoFactorEnabled = false;
+            account.AuthenticatorSecretProtected = null;
+            account.TwoFactorBackupCodeHashes = Array.Empty<string>();
+            account.TwoFactorLoginTicketHash = null;
+            account.TwoFactorLoginTicketExpiresAt = null;
+            RevokeOtherSessionsForCurrentUser();
+            _context.SaveChanges();
+
+            return Ok(new { message = "Two-factor authentication disabled.", twoFactor = BuildTwoFactorStatus(account) });
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("auth")]
+        public IActionResult RegenerateBackupCodes([FromBody] DisableTwoFactorRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            if (!account.TwoFactorEnabled)
+            {
+                return BadRequest(new { message = "Enable authenticator-app 2FA before generating backup codes." });
+            }
+
+            if (PasswordHasher.VerifyPassword(account.PassWord, request.Password) == PasswordVerificationResult.Failed)
+            {
+                return BadRequest(new { message = "Password is incorrect." });
+            }
+
+            if (!TryValidateTwoFactorCode(account, request.Code, consumeBackupCode: false))
+            {
+                return BadRequest(new { message = "Two-factor code is invalid." });
+            }
+
+            var backupCodes = GenerateBackupCodes();
+            account.TwoFactorBackupCodeHashes = backupCodes
+                .Select(code => HashBackupCode(account.UserName, code))
+                .ToArray();
+            _context.SaveChanges();
+
+            return Ok(new
+            {
+                message = "Backup codes regenerated.",
+                backupCodes,
+                twoFactor = BuildTwoFactorStatus(account)
+            });
+        }
+
+        [HttpPost]
+        public IActionResult UpdatePresence([FromBody] PresenceUpdateRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            var status = NormalizePresenceStatus(request.PresenceStatus);
+            if (status == null)
+            {
+                return BadRequest(new { message = "Presence must be online, idle, do-not-disturb, or invisible." });
+            }
+
+            account.PresenceStatus = status;
+            _context.SaveChanges();
+            return Ok(BuildAccountSettingsResponse(account));
+        }
+
+        [HttpPost]
+        public IActionResult UpdatePrivacySettings([FromBody] PrivacySettingsUpdateRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            var dmPolicy = NormalizeDmPolicy(request.DmPolicy);
+            if (dmPolicy == null)
+            {
+                return BadRequest(new { message = "DM privacy must be everyone, friends, or none." });
+            }
+
+            account.PrivacyDmPolicy = dmPolicy;
+            account.PrivacyAllowFriendRequestsEveryone = request.AllowFriendRequestsEveryone;
+            account.PrivacyAllowFriendRequestsFriendsOfFriends = request.AllowFriendRequestsFriendsOfFriends;
+            account.PrivacyAllowFriendRequestsServerMembers = request.AllowFriendRequestsServerMembers;
+            account.PrivacyShowActivity = request.ShowActivity;
+
+            _context.SaveChanges();
+            return Ok(BuildAccountSettingsResponse(account));
+        }
+
+        [HttpGet]
+        public IActionResult GetBlockedUsers()
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            return Ok(account.BlockedUsers ?? Array.Empty<string>());
+        }
+
+        [HttpPost]
+        public IActionResult BlockUser([FromBody] UserTargetRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            var targetUsername = NormalizeUsername(request.TargetUsername);
+            if (string.IsNullOrWhiteSpace(targetUsername) ||
+                string.Equals(account.UserName, targetUsername, StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest(new { message = "Target username is required." });
+            }
+
+            var target = FindActiveAccount(targetUsername);
+            if (target == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            account.BlockedUsers = AddUnique(account.BlockedUsers, targetUsername);
+            account.Friends = RemoveValue(account.Friends, targetUsername);
+            target.Friends = RemoveValue(target.Friends, account.UserName);
+            account.IncomingFriendRequests = RemoveValue(account.IncomingFriendRequests, targetUsername);
+            account.OutgoingFriendRequests = RemoveValue(account.OutgoingFriendRequests, targetUsername);
+            target.IncomingFriendRequests = RemoveValue(target.IncomingFriendRequests, account.UserName);
+            target.OutgoingFriendRequests = RemoveValue(target.OutgoingFriendRequests, account.UserName);
+            _context.SaveChanges();
+
+            return Ok(new { message = "User blocked.", blockedUsers = account.BlockedUsers });
+        }
+
+        [HttpPost]
+        public IActionResult UnblockUser([FromBody] UserTargetRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            var targetUsername = NormalizeUsername(request.TargetUsername);
+            if (string.IsNullOrWhiteSpace(targetUsername))
+            {
+                return BadRequest(new { message = "Target username is required." });
+            }
+
+            account.BlockedUsers = RemoveValue(account.BlockedUsers, targetUsername);
+            _context.SaveChanges();
+
+            return Ok(new { message = "User unblocked.", blockedUsers = account.BlockedUsers });
+        }
+
+        [HttpPost]
+        public IActionResult RevokeSession([FromBody] RevokeSessionRequest request)
+        {
+            var username = GetCurrentUsername();
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                return Unauthorized(new { message = "Missing user identity." });
+            }
+
+            var sessionId = request.SessionId?.Trim();
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                return BadRequest(new { message = "Session id is required." });
+            }
+
+            var session = _context.AccountSessions.FirstOrDefault(s => s.Id == sessionId && s.Username == username);
+            if (session == null)
+            {
+                return NotFound(new { message = "Session not found." });
+            }
+
+            session.RevokedAt ??= DateTime.UtcNow;
+            _context.SaveChanges();
+
+            if (session.Id == User.GetSessionId())
+            {
+                ClearAuthCookies();
+            }
+
+            return Ok(new { message = "Session revoked." });
+        }
+
+        private SessionTokenResponse CreateSession(Account account)
+        {
+            var refreshToken = GenerateOpaqueToken();
+            var session = new AccountSession
+            {
+                Id = Guid.NewGuid().ToString(),
+                AccountId = account.Id,
+                Username = account.UserName,
+                RefreshTokenHash = HashToken(refreshToken),
+                CreatedAt = DateTime.UtcNow,
+                LastSeenAt = DateTime.UtcNow,
+                ExpiresAt = DateTime.UtcNow.AddDays(RefreshTokenDays),
+                UserAgent = HttpContext?.Request.Headers.UserAgent.ToString(),
+                IpAddress = HttpContext?.Connection.RemoteIpAddress?.ToString()
+            };
+
+            _context.AccountSessions.Add(session);
+            var expiresAt = DateTime.UtcNow.AddHours(AccessTokenHours);
+
+            return new SessionTokenResponse
+            {
+                AccessToken = CreateJwt(account.UserName, session.Id, expiresAt),
+                RefreshToken = refreshToken,
+                AccessTokenExpiresAt = expiresAt,
+                SessionId = session.Id
+            };
+        }
+
+        private async Task<IActionResult> StartContactVerification(Account account, string kind, string target)
+        {
+            var now = DateTime.UtcNow;
+            var expiresAt = now.AddMinutes(10);
+            var code = GenerateVerificationCode();
+
+            var existing = await _context.ContactVerifications
+                .Where(verification =>
+                    verification.Username == account.UserName &&
+                    verification.Kind == kind &&
+                    verification.ConsumedAt == null)
+                .ToListAsync();
+            existing.ForEach(verification => verification.ConsumedAt = now);
+
+            var verification = new ContactVerification
+            {
+                Id = Guid.NewGuid().ToString(),
+                Username = account.UserName,
+                Kind = kind,
+                Target = target,
+                CodeHash = HashVerificationCode(account.UserName, kind, target, code),
+                CreatedAt = now,
+                ExpiresAt = expiresAt
+            };
+            _context.ContactVerifications.Add(verification);
+
+            try
+            {
+                if (_verificationDelivery != null)
+                {
+                    await _verificationDelivery.SendAsync(
+                        new ContactVerificationMessage(kind, target, account.UserName, code, expiresAt),
+                        HttpContext.RequestAborted);
+                }
+                else
+                {
+                    Console.WriteLine($"{kind} verification code for {target}: {code}");
+                }
+
+                await _context.SaveChangesAsync();
+                return Ok(new
+                {
+                    message = $"{kind} verification code sent.",
+                    target,
+                    expiresAt,
+                    deliveryConfigured = IsVerificationDeliveryConfigured(kind)
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldnt send {kind} verification: {ex.Message}");
+                return StatusCode(502, new { message = $"Could not send {kind} verification code." });
+            }
+        }
+
+        private async Task<IActionResult> ConfirmContactVerification(Account account, string kind, string code)
+        {
+            code = code?.Trim() ?? string.Empty;
+            if (!Regex.IsMatch(code, "^[0-9]{6}$"))
+            {
+                return BadRequest(new { message = "Verification code must be 6 digits." });
+            }
+
+            var now = DateTime.UtcNow;
+            var verification = await _context.ContactVerifications
+                .Where(item =>
+                    item.Username == account.UserName &&
+                    item.Kind == kind &&
+                    item.ConsumedAt == null &&
+                    item.ExpiresAt > now)
+                .OrderByDescending(item => item.CreatedAt)
+                .FirstOrDefaultAsync();
+
+            if (verification == null)
+            {
+                return BadRequest(new { message = "Verification code is invalid or expired." });
+            }
+
+            var expectedHash = HashVerificationCode(
+                account.UserName,
+                kind,
+                verification.Target,
+                code);
+            if (!CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(expectedHash),
+                Encoding.UTF8.GetBytes(verification.CodeHash)))
+            {
+                return BadRequest(new { message = "Verification code is invalid or expired." });
+            }
+
+            verification.ConsumedAt = now;
+            if (kind == "email")
+            {
+                account.Email = verification.Target;
+                account.EmailVerifiedAt = now;
+            }
+            else
+            {
+                account.PhoneNumber = verification.Target;
+                account.PhoneNumberVerifiedAt = now;
+            }
+
+            await _context.SaveChangesAsync();
+            return Ok(BuildAccountSettingsResponse(account));
+        }
+
+        private string HashVerificationCode(string username, string kind, string target, string code)
+        {
+            var secret = _config["Verification:Secret"] ?? _config["Jwt:Key"];
+            if (string.IsNullOrWhiteSpace(secret))
+            {
+                throw new InvalidOperationException("Verification:Secret or Jwt:Key must be configured.");
+            }
+
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+            var bytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(
+                $"{username.Trim().ToLowerInvariant()}|{kind}|{target.Trim().ToLowerInvariant()}|{code}"));
+            return Convert.ToHexString(bytes);
+        }
+
+        private static string GenerateVerificationCode()
+        {
+            return RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
+        }
+
+        private bool IsVerificationDeliveryConfigured(string kind)
+        {
+            var section = kind == "phone" ? "Verification:Sms" : "Verification:Email";
+            return !string.IsNullOrWhiteSpace(_config[$"{section}:WebhookUrl"]);
+        }
+
+        private bool IsPhoneVerificationAvailable()
+        {
+            return IsVerificationDeliveryConfigured("phone");
+        }
+
+        private object BuildTwoFactorStatus(Account account)
+        {
+            return new
+            {
+                enabled = account.TwoFactorEnabled,
+                authenticatorConfigured = !string.IsNullOrWhiteSpace(account.AuthenticatorSecretProtected),
+                backupCodesRemaining = account.TwoFactorBackupCodeHashes?.Length ?? 0
+            };
+        }
+
+        private bool TryValidateTwoFactorCode(Account account, string? code, bool consumeBackupCode)
+        {
+            return TryValidateAuthenticatorCode(account, code) ||
+                   TryValidateBackupCode(account, code, consumeBackupCode);
+        }
+
+        private bool TryValidateAuthenticatorCode(Account account, string? code)
+        {
+            if (string.IsNullOrWhiteSpace(account.AuthenticatorSecretProtected))
+            {
+                return false;
+            }
+
+            string secret;
+            try
+            {
+                secret = UnprotectAuthenticatorSecret(account.AuthenticatorSecretProtected);
+            }
+            catch
+            {
+                return false;
+            }
+
+            return ValidateTotp(secret, code);
+        }
+
+        private bool TryValidateBackupCode(Account account, string? code, bool consumeBackupCode)
+        {
+            var normalizedCode = NormalizeBackupCode(code);
+            if (string.IsNullOrWhiteSpace(normalizedCode))
+            {
+                return false;
+            }
+
+            var hashes = account.TwoFactorBackupCodeHashes ?? Array.Empty<string>();
+            var suppliedHash = HashBackupCode(account.UserName, normalizedCode);
+            var matchIndex = Array.FindIndex(hashes, hash =>
+                FixedTimeEquals(hash, suppliedHash));
+
+            if (matchIndex < 0)
+            {
+                return false;
+            }
+
+            if (consumeBackupCode)
+            {
+                account.TwoFactorBackupCodeHashes = hashes
+                    .Where((_, index) => index != matchIndex)
+                    .ToArray();
+            }
+
+            return true;
+        }
+
+        private string HashBackupCode(string username, string code)
+        {
+            var secret = _config["Verification:Secret"] ?? _config["Jwt:Key"];
+            if (string.IsNullOrWhiteSpace(secret))
+            {
+                throw new InvalidOperationException("Verification:Secret or Jwt:Key must be configured.");
+            }
+
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+            var bytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(
+                $"2fa-backup|{username.Trim().ToLowerInvariant()}|{NormalizeBackupCode(code)}"));
+            return Convert.ToHexString(bytes);
+        }
+
+        private static string[] GenerateBackupCodes()
+        {
+            return Enumerable.Range(0, BackupCodeCount)
+                .Select(_ => GenerateBackupCode())
+                .ToArray();
+        }
+
+        private static string GenerateBackupCode()
+        {
+            const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+            var chars = Enumerable.Range(0, BackupCodeCharacters)
+                .Select(_ => alphabet[RandomNumberGenerator.GetInt32(alphabet.Length)])
+                .ToArray();
+            return $"{new string(chars.Take(5).ToArray())}-{new string(chars.Skip(5).ToArray())}";
+        }
+
+        private static string NormalizeBackupCode(string? code)
+        {
+            return Regex.Replace(code ?? string.Empty, "[^A-Za-z0-9]", string.Empty)
+                .Trim()
+                .ToUpperInvariant();
+        }
+
+        private string ProtectAuthenticatorSecret(string secret)
+        {
+            var key = GetLocalProtectionKey();
+            var nonce = RandomNumberGenerator.GetBytes(12);
+            var plaintext = Encoding.UTF8.GetBytes(secret);
+            var ciphertext = new byte[plaintext.Length];
+            var tag = new byte[16];
+
+            using var aes = new AesGcm(key, 16);
+            aes.Encrypt(nonce, plaintext, ciphertext, tag);
+
+            return $"v1:{Convert.ToBase64String(nonce)}:{Convert.ToBase64String(tag)}:{Convert.ToBase64String(ciphertext)}";
+        }
+
+        private string UnprotectAuthenticatorSecret(string protectedSecret)
+        {
+            if (!protectedSecret.StartsWith("v1:", StringComparison.Ordinal))
+            {
+                return protectedSecret;
+            }
+
+            var parts = protectedSecret.Split(':');
+            if (parts.Length != 4)
+            {
+                throw new InvalidOperationException("Authenticator secret is not in a supported format.");
+            }
+
+            var nonce = Convert.FromBase64String(parts[1]);
+            var tag = Convert.FromBase64String(parts[2]);
+            var ciphertext = Convert.FromBase64String(parts[3]);
+            var plaintext = new byte[ciphertext.Length];
+
+            using var aes = new AesGcm(GetLocalProtectionKey(), 16);
+            aes.Decrypt(nonce, ciphertext, tag, plaintext);
+            return Encoding.UTF8.GetString(plaintext);
+        }
+
+        private byte[] GetLocalProtectionKey()
+        {
+            var secret = _config["Verification:Secret"] ?? _config["Jwt:Key"];
+            if (string.IsNullOrWhiteSpace(secret))
+            {
+                throw new InvalidOperationException("Verification:Secret or Jwt:Key must be configured.");
+            }
+
+            return SHA256.HashData(Encoding.UTF8.GetBytes(secret));
+        }
+
+        private static string GenerateBase32Secret()
+        {
+            return Base32Encode(RandomNumberGenerator.GetBytes(20));
+        }
+
+        private static string Base32Encode(byte[] bytes)
+        {
+            var output = new StringBuilder();
+            var buffer = 0;
+            var bitsLeft = 0;
+
+            foreach (var value in bytes)
+            {
+                buffer = (buffer << 8) | value;
+                bitsLeft += 8;
+
+                while (bitsLeft >= 5)
+                {
+                    output.Append(Base32Alphabet[(buffer >> (bitsLeft - 5)) & 31]);
+                    bitsLeft -= 5;
+                }
+            }
+
+            if (bitsLeft > 0)
+            {
+                output.Append(Base32Alphabet[(buffer << (5 - bitsLeft)) & 31]);
+            }
+
+            return output.ToString();
+        }
+
+        private static byte[] Base32Decode(string secret)
+        {
+            var cleanSecret = Regex.Replace(secret ?? string.Empty, @"\s|=", string.Empty)
+                .ToUpperInvariant();
+            var output = new List<byte>();
+            var buffer = 0;
+            var bitsLeft = 0;
+
+            foreach (var character in cleanSecret)
+            {
+                var value = Base32Alphabet.IndexOf(character);
+                if (value < 0)
+                {
+                    throw new FormatException("Authenticator secret contains an invalid character.");
+                }
+
+                buffer = (buffer << 5) | value;
+                bitsLeft += 5;
+
+                if (bitsLeft >= 8)
+                {
+                    output.Add((byte)((buffer >> (bitsLeft - 8)) & 255));
+                    bitsLeft -= 8;
+                }
+            }
+
+            return output.ToArray();
+        }
+
+        private static bool ValidateTotp(string secret, string? code)
+        {
+            var normalizedCode = Regex.Replace(code ?? string.Empty, @"\s", string.Empty);
+            if (!Regex.IsMatch(normalizedCode, "^[0-9]{6}$"))
+            {
+                return false;
+            }
+
+            var currentTimeStep = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 30;
+            for (var drift = -1; drift <= 1; drift++)
+            {
+                var expected = ComputeTotp(secret, currentTimeStep + drift);
+                if (FixedTimeEquals(expected, normalizedCode))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string ComputeTotp(string secret, long timeStep)
+        {
+            var key = Base32Decode(secret);
+            var counter = BitConverter.GetBytes(timeStep);
+            if (BitConverter.IsLittleEndian)
+            {
+                Array.Reverse(counter);
+            }
+
+            using var hmac = new HMACSHA1(key);
+            var hash = hmac.ComputeHash(counter);
+            var offset = hash[^1] & 0x0f;
+            var binary =
+                ((hash[offset] & 0x7f) << 24) |
+                ((hash[offset + 1] & 0xff) << 16) |
+                ((hash[offset + 2] & 0xff) << 8) |
+                (hash[offset + 3] & 0xff);
+
+            return (binary % 1_000_000).ToString("D6");
+        }
+
+        private string CreateJwt(string username, string sessionId, DateTime expiresAt)
+        {
+            var credentials = new SigningCredentials(GetSigningKey(), SecurityAlgorithms.HmacSha256);
+            var claims = new List<Claim>
+            {
+                new(AuthClaims.UsernameClaim, username),
+                new(AuthClaims.SessionIdClaim, sessionId),
+                new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+                new(ClaimTypes.Name, username)
+            };
+
+            var token = new JwtSecurityToken(
+                issuer: _config["Jwt:Issuer"],
+                audience: _config["Jwt:Issuer"],
+                claims: claims,
+                expires: expiresAt,
+                signingCredentials: credentials
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+
+        private SymmetricSecurityKey GetSigningKey()
+        {
+            var jwtKey = _config["Jwt:Key"];
+            if (string.IsNullOrWhiteSpace(jwtKey))
+            {
+                throw new InvalidOperationException("Jwt:Key is missing");
+            }
+
+            return new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+        }
+
+        private AccessTokenValidationResult ValidateAccessTokenAndSession(string token)
+        {
+            var tokenHandler = new JwtSecurityTokenHandler();
+            var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidateLifetime = true,
+                ValidateIssuerSigningKey = true,
+                ValidIssuer = _config["Jwt:Issuer"],
+                ValidAudience = _config["Jwt:Issuer"],
+                IssuerSigningKey = GetSigningKey(),
+                ClockSkew = TimeSpan.FromMinutes(2)
+            }, out _);
+
+            var username = principal.GetUsername();
+            var sessionId = principal.GetSessionId();
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(sessionId))
+            {
+                return AccessTokenValidationResult.Invalid;
+            }
+
+            var session = _context.AccountSessions.FirstOrDefault(s => s.Id == sessionId && s.Username == username);
+            var account = _context.Accounts.FirstOrDefault(a => a.UserName == username);
+            if (session == null || account == null || account.IsDisabled ||
+                session.RevokedAt != null || session.ExpiresAt <= DateTime.UtcNow)
+            {
+                return AccessTokenValidationResult.Invalid;
+            }
+
+            return AccessTokenValidationResult.Valid;
+        }
+
+        private string? ReadAccessTokenFromRequest()
+        {
+            var authHeader = HttpContext?.Request.Headers.Authorization.ToString();
+            if (!string.IsNullOrWhiteSpace(authHeader) &&
+                authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                return authHeader["Bearer ".Length..].Trim();
+            }
+
+            return HttpContext?.Request.Cookies["token"];
+        }
+
+        private string? GetCurrentUsername()
+        {
+            return User.GetUsername();
+        }
+
+        private Account? GetCurrentAccount()
+        {
+            var username = GetCurrentUsername();
+            return string.IsNullOrWhiteSpace(username) ? null : FindActiveAccount(username);
+        }
+
+        private object BuildAccountSettingsResponse(Account account)
+        {
+            return new
+            {
+                username = account.UserName,
+                email = account.Email,
+                phoneNumber = account.PhoneNumber,
+                emailVerified = account.EmailVerifiedAt != null,
+                phoneNumberVerified = account.PhoneNumberVerifiedAt != null,
+                emailVerifiedAt = account.EmailVerifiedAt,
+                phoneNumberVerifiedAt = account.PhoneNumberVerifiedAt,
+                emailVerificationAvailable = true,
+                phoneVerificationAvailable = IsPhoneVerificationAvailable(),
+                twoFactor = BuildTwoFactorStatus(account),
+                profilePictureUrl = account.ProfilePictureUrl,
+                profileBannerUrl = account.ProfileBannerUrl,
+                profileBannerColor = account.ProfileBannerColor ?? "#0c0c0c",
+                description = account.Description,
+                presenceStatus = NormalizePresenceStatus(account.PresenceStatus) ?? "online",
+                privacy = new
+                {
+                    dmPolicy = NormalizeDmPolicy(account.PrivacyDmPolicy) ?? "friends",
+                    allowFriendRequestsEveryone = account.PrivacyAllowFriendRequestsEveryone,
+                    allowFriendRequestsFriendsOfFriends = account.PrivacyAllowFriendRequestsFriendsOfFriends,
+                    allowFriendRequestsServerMembers = account.PrivacyAllowFriendRequestsServerMembers,
+                    showActivity = account.PrivacyShowActivity
+                },
+                blockedUsers = account.BlockedUsers ?? Array.Empty<string>(),
+                settingsJson = string.IsNullOrWhiteSpace(account.SettingsJson) ? "{}" : account.SettingsJson,
+                voiceChangerSettingsJson = string.IsNullOrWhiteSpace(account.VoiceChangerSettingsJson)
+                    ? "{}"
+                    : account.VoiceChangerSettingsJson
+            };
+        }
+
+        private Account? FindActiveAccount(string username)
+        {
+            var normalizedUsername = NormalizeUsername(username);
+            return _context.Accounts.FirstOrDefault(a => a.UserName == normalizedUsername && !a.IsDisabled);
+        }
+
+        private bool UsernameExists(string username)
+        {
+            var loweredUsername = username.ToLowerInvariant();
+            return _context.Accounts.Any(a => a.UserName.ToLower() == loweredUsername);
+        }
+
+        private bool CanReceiveFriendRequest(Account recipient, Account requester)
+        {
+            if (recipient.PrivacyAllowFriendRequestsEveryone)
+            {
+                return true;
+            }
+
+            if (recipient.PrivacyAllowFriendRequestsFriendsOfFriends &&
+                SharesFriend(recipient, requester))
+            {
+                return true;
+            }
+
+            return recipient.PrivacyAllowFriendRequestsServerMembers &&
+                   SharesServer(recipient.UserName, requester.UserName);
+        }
+
+        private bool SharesFriend(Account left, Account right)
+        {
+            var leftFriends = left.Friends ?? Array.Empty<string>();
+            var rightFriends = right.Friends ?? Array.Empty<string>();
+            return leftFriends.Intersect(rightFriends, StringComparer.OrdinalIgnoreCase).Any();
+        }
+
+        private bool SharesServer(string leftUsername, string rightUsername)
+        {
+            var leftServerIds = _context.ServerMembers
+                .Where(member => member.Username == leftUsername)
+                .Select(member => member.ServerId)
+                .ToList();
+
+            return _context.ServerMembers.Any(member =>
+                member.Username == rightUsername && leftServerIds.Contains(member.ServerId));
+        }
+
+        private void RevokeCurrentSession()
+        {
+            var sessionId = User.GetSessionId();
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                return;
+            }
+
+            var session = _context.AccountSessions.FirstOrDefault(s => s.Id == sessionId);
+            if (session != null && session.RevokedAt == null)
+            {
+                session.RevokedAt = DateTime.UtcNow;
+            }
+        }
+
+        private void RevokeOtherSessionsForCurrentUser()
+        {
+            var username = GetCurrentUsername();
+            var sessionId = User.GetSessionId();
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                return;
+            }
+
+            foreach (var session in _context.AccountSessions.Where(s =>
+                         s.Username == username &&
+                         s.Id != sessionId &&
+                         s.RevokedAt == null))
+            {
+                session.RevokedAt = DateTime.UtcNow;
+            }
+        }
+
+        private void RevokeSessionsForUsername(string username)
+        {
+            foreach (var session in _context.AccountSessions.Where(s =>
+                         s.Username == username &&
+                         s.RevokedAt == null))
+            {
+                session.RevokedAt = DateTime.UtcNow;
+            }
+        }
+
+        private void CleanupDeletedAccount(Account account)
+        {
+            var username = account.UserName;
+            RemoveUsernameFromAccountRelationships(username);
+
+            foreach (var group in _context.GroupChats.ToList())
+            {
+                var remainingMembers = RemoveValue(group.Members, username);
+                if (remainingMembers.Length == 0)
+                {
+                    var messages = _context.GroupMessages.Where(message => message.GroupId == group.Id).ToList();
+                    _context.GroupMessages.RemoveRange(messages);
+                    _context.GroupChats.Remove(group);
+                    continue;
+                }
+
+                group.Members = remainingMembers;
+                if (string.Equals(group.Owner, username, StringComparison.OrdinalIgnoreCase))
+                {
+                    group.Owner = remainingMembers[0];
+                }
+            }
+
+            var privateMessages = _context.PrivateMessageFriends
+                .Where(message => message.MessagesUserSender == username || message.MessageUserReciver == username)
+                .ToList();
+            _context.PrivateMessageFriends.RemoveRange(privateMessages);
+
+            foreach (var groupMessage in _context.GroupMessages.Where(message => message.Sender == username))
+            {
+                groupMessage.Sender = DeletedUserName;
+            }
+
+            foreach (var serverMessage in _context.ServerMessages.Where(message => message.MessagesUserSender == username))
+            {
+                serverMessage.MessagesUserSender = DeletedUserName;
+            }
+
+            foreach (var server in _context.CreateServers.Where(server => server.ServerOwner == username).ToList())
+            {
+                CleanupOwnedServerForDeletedUser(server, username);
+            }
+
+            var memberships = _context.ServerMembers.Where(member => member.Username == username).ToList();
+            _context.ServerMembers.RemoveRange(memberships);
+
+            var sessions = _context.AccountSessions.Where(session => session.AccountId == account.Id || session.Username == username).ToList();
+            _context.AccountSessions.RemoveRange(sessions);
+        }
+
+        private void CleanupOwnedServerForDeletedUser(CreateServer server, string username)
+        {
+            var serverId = server.ServerID;
+            if (string.IsNullOrWhiteSpace(serverId))
+            {
+                return;
+            }
+
+            var remainingMembers = _context.ServerMembers
+                .Where(member => member.ServerId == serverId && member.Username != username)
+                .OrderBy(member => member.Id)
+                .ToList();
+
+            if (remainingMembers.Count > 0)
+            {
+                var nextOwner = remainingMembers.First();
+                nextOwner.Role = "owner";
+                server.ServerOwner = nextOwner.Username;
+
+                foreach (var duplicateOwner in remainingMembers
+                             .Where(member => member.Username != nextOwner.Username && member.Role == "owner"))
+                {
+                    duplicateOwner.Role = "user";
+                }
+
+                return;
+            }
+
+            var serverMessages = _context.ServerMessages
+                .Where(message => _context.Channels
+                    .Where(channel => channel.ServerId == serverId)
+                    .Select(channel => channel.Id)
+                    .Contains(message.ChannelId))
+                .ToList();
+            var channels = _context.Channels.Where(channel => channel.ServerId == serverId).ToList();
+            var categories = _context.Categories.Where(category => category.ServerId == serverId).ToList();
+            var members = _context.ServerMembers.Where(member => member.ServerId == serverId).ToList();
+
+            _context.ServerMessages.RemoveRange(serverMessages);
+            _context.Channels.RemoveRange(channels);
+            _context.Categories.RemoveRange(categories);
+            _context.ServerMembers.RemoveRange(members);
+            _context.CreateServers.Remove(server);
+        }
+
+        private void SetRefreshCookie(string refreshToken)
+        {
+            HttpContext?.Response.Cookies.Append("refreshToken", refreshToken, new CookieOptions
+            {
+                HttpOnly = true,
+                Secure = HttpContext?.Request.IsHttps ?? false,
+                SameSite = SameSiteMode.Lax,
+                Expires = DateTimeOffset.UtcNow.AddDays(RefreshTokenDays)
+            });
+        }
+
+        private void ClearAuthCookies()
+        {
+            HttpContext?.Response.Cookies.Delete("refreshToken");
+            HttpContext?.Response.Cookies.Delete("token");
+        }
+
+        private static string NormalizeUsername(string? username)
+        {
+            return username?.Trim() ?? string.Empty;
+        }
+
+        private static bool IsValidUsername(string username)
+        {
+            return UsernameRegex.IsMatch(username);
+        }
+
+        private static bool IsValidPassword(string? password)
+        {
+            if (string.IsNullOrWhiteSpace(password) || password.Length < 8 || password.Length > 128)
+            {
+                return false;
+            }
+
+            return password.Any(char.IsLetter) && password.Any(char.IsDigit);
+        }
+
+        private static bool IsValidEmail(string email)
+        {
+            try
+            {
+                var address = new System.Net.Mail.MailAddress(email);
+                return string.Equals(address.Address, email, StringComparison.OrdinalIgnoreCase) &&
+                       email.Length <= 256;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsValidHexColor(string? color)
+        {
+            return !string.IsNullOrWhiteSpace(color) &&
+                   Regex.IsMatch(color, "^#[0-9a-fA-F]{6}$");
+        }
+
+        private static bool IsValidProfileUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                return true;
+            }
+
+            if (url.StartsWith("/uploads/", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            return Uri.TryCreate(url, UriKind.Absolute, out var parsedUrl) &&
+                   (parsedUrl.Scheme == Uri.UriSchemeHttp || parsedUrl.Scheme == Uri.UriSchemeHttps);
+        }
+
+        private static string? NormalizePresenceStatus(string? status)
+        {
+            var normalized = status?.Trim().ToLowerInvariant();
+            return !string.IsNullOrWhiteSpace(normalized) && PresenceStatuses.Contains(normalized)
+                ? normalized
+                : null;
+        }
+
+        private static string? NormalizeDmPolicy(string? policy)
+        {
+            var normalized = policy?.Trim().ToLowerInvariant();
+            return !string.IsNullOrWhiteSpace(normalized) && DmPolicies.Contains(normalized)
+                ? normalized
+                : null;
+        }
+
+        private static bool TryNormalizeJsonObject(JsonElement value, out string json, out string error)
+        {
+            json = "{}";
+            error = string.Empty;
+
+            if (value.ValueKind is not JsonValueKind.Object)
+            {
+                error = "Settings payload must be a JSON object.";
+                return false;
+            }
+
+            var rawJson = value.GetRawText();
+            if (Encoding.UTF8.GetByteCount(rawJson) > MaxSettingsJsonBytes)
+            {
+                error = "Settings payload is too large.";
+                return false;
+            }
+
+            json = rawJson;
+            return true;
+        }
+
+        private static bool ContainsValue(string[]? values, string value)
+        {
+            return values?.Any(item => string.Equals(item, value, StringComparison.OrdinalIgnoreCase)) == true;
+        }
+
+        private static string[] AddUnique(string[]? values, string value)
+        {
+            return (values ?? Array.Empty<string>())
+                .Append(value)
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static string[] RemoveValue(string[]? values, string value)
+        {
+            return (values ?? Array.Empty<string>())
+                .Where(item => !string.Equals(item, value, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private void RemoveUsernameFromAccountRelationships(string username)
+        {
+            foreach (var account in _context.Accounts.Where(a => a.UserName != username))
+            {
+                account.Friends = RemoveValue(account.Friends, username);
+                account.IncomingFriendRequests = RemoveValue(account.IncomingFriendRequests, username);
+                account.OutgoingFriendRequests = RemoveValue(account.OutgoingFriendRequests, username);
+            }
+        }
+
+        private static string GenerateOpaqueToken()
+        {
+            return Convert.ToHexString(RandomNumberGenerator.GetBytes(64));
+        }
+
+        private static string HashToken(string token)
+        {
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
+        }
+
+        private static bool FixedTimeEquals(string a, string b)
+        {
+            return CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(a),
+                Encoding.UTF8.GetBytes(b));
+        }
+
+        private sealed class SessionTokenResponse
+        {
+            public string AccessToken { get; set; } = string.Empty;
+            public string RefreshToken { get; set; } = string.Empty;
+            public DateTime AccessTokenExpiresAt { get; set; }
+            public string SessionId { get; set; } = string.Empty;
+        }
+
+        private sealed class AccessTokenValidationResult
+        {
+            public static readonly AccessTokenValidationResult Valid = new() { IsValid = true };
+            public static readonly AccessTokenValidationResult Invalid = new() { IsValid = false };
+            public bool IsValid { get; init; }
         }
     }
 
     public class ThemeUpdateRequest
     {
-        public string Username { get; set; }
+        public string Username { get; set; } = string.Empty;
         public string? BackgroundColor { get; set; }
         public string? TextColor { get; set; }
     }
 
     public class ProfileUpdateRequest
     {
-        public string Username { get; set; }
+        public string Username { get; set; } = string.Empty;
         public string? ProfilePictureUrl { get; set; }
+        public string? ProfileBannerUrl { get; set; }
+        public string? ProfileBannerColor { get; set; }
         public string? Description { get; set; }
     }
-}
 
+    public class AccountSettingsUpdateRequest
+    {
+        public JsonElement Settings { get; set; }
+        public JsonElement VoiceChangerSettings { get; set; }
+    }
+
+    public class ContactInfoUpdateRequest
+    {
+        public string? Email { get; set; }
+        public string? PhoneNumber { get; set; }
+    }
+
+    public class ContactVerificationRequest
+    {
+        public string? Target { get; set; }
+    }
+
+    public class ContactVerificationConfirmRequest
+    {
+        public string Code { get; set; } = string.Empty;
+    }
+
+    public class AuthenticatorSetupRequest
+    {
+        public string? Label { get; set; }
+    }
+
+    public class TwoFactorCodeRequest
+    {
+        public string Code { get; set; } = string.Empty;
+    }
+
+    public class DisableTwoFactorRequest
+    {
+        public string Password { get; set; } = string.Empty;
+        public string Code { get; set; } = string.Empty;
+    }
+
+    public class PresenceUpdateRequest
+    {
+        public string PresenceStatus { get; set; } = "online";
+    }
+
+    public class PrivacySettingsUpdateRequest
+    {
+        public string DmPolicy { get; set; } = "friends";
+        public bool AllowFriendRequestsEveryone { get; set; } = true;
+        public bool AllowFriendRequestsFriendsOfFriends { get; set; } = true;
+        public bool AllowFriendRequestsServerMembers { get; set; } = true;
+        public bool ShowActivity { get; set; } = true;
+    }
+
+    public class UserTargetRequest
+    {
+        public string TargetUsername { get; set; } = string.Empty;
+    }
+
+    public class RevokeSessionRequest
+    {
+        public string SessionId { get; set; } = string.Empty;
+    }
+
+    public class ChangePasswordRequest
+    {
+        public string Username { get; set; } = string.Empty;
+        public string CurrentPassword { get; set; } = string.Empty;
+        public string NewPassword { get; set; } = string.Empty;
+    }
+
+    public class AccountPasswordRequest
+    {
+        public string Username { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+    }
+
+    public class RefreshTokenRequest
+    {
+        public string RefreshToken { get; set; } = string.Empty;
+    }
+
+    public class TwoFactorLoginRequest
+    {
+        public string Username { get; set; } = string.Empty;
+        public string TwoFactorTicket { get; set; } = string.Empty;
+        public string Code { get; set; } = string.Empty;
+    }
+
+    public class PasswordResetRequest
+    {
+        public string Username { get; set; } = string.Empty;
+    }
+
+    public class ResetPasswordRequest
+    {
+        public string Username { get; set; } = string.Empty;
+        public string Token { get; set; } = string.Empty;
+        public string NewPassword { get; set; } = string.Empty;
+    }
+}
