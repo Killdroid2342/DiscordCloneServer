@@ -1,4 +1,6 @@
 using System;
+using DiscordCloneServer.Data;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -6,6 +8,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace DiscordCloneServer.Migrations
 {
     [Migration("20260426213000_AddSessionsAndPasswordReset")]
+    [DbContext(typeof(ApiContext))]
     public partial class AddSessionsAndPasswordReset : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)
