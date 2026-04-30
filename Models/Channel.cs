@@ -11,5 +11,9 @@ namespace DiscordCloneServer.Models
         public string Name { get; set; } = string.Empty;
         public string Type { get; set; } = string.Empty;
         public int Position { get; set; }
+        public bool VoiceAccessRestricted { get; set; }
+        public string VoiceAllowedRolesJson { get; set; } = "[]";
+        public bool StageSpeakerRestricted { get; set; }
+        public string StageSpeakerRolesJson { get; set; } = "[]";
     }
 }
