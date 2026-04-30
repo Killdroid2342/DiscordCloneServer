@@ -156,14 +156,16 @@ namespace DiscordCloneServer.Controllers
          
             var textCategory = new Category { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, Name = "Text Channels", Position = 0 };
             var voiceCategory = new Category { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, Name = "Voice Channels", Position = 1 };
+            var stageCategory = new Category { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, Name = "Stage Channels", Position = 2 };
 
-            _context.Categories.AddRange(textCategory, voiceCategory);
+            _context.Categories.AddRange(textCategory, voiceCategory, stageCategory);
 
            
             var generalText = new Channel { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, CategoryId = textCategory.Id, Name = "general", Type = "text", Position = 0 };
             var generalVoice = new Channel { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, CategoryId = voiceCategory.Id, Name = "General", Type = "voice", Position = 0 };
+            var townHallStage = new Channel { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, CategoryId = stageCategory.Id, Name = "Town Hall", Type = "stage", Position = 0 };
 
-            _context.Channels.AddRange(generalText, generalVoice);
+            _context.Channels.AddRange(generalText, generalVoice, townHallStage);
             await _context.SaveChangesAsync();
 
             return Ok(BuildServerResponse(createServer, "owner"));
@@ -550,7 +552,7 @@ namespace DiscordCloneServer.Controllers
             if (!IsValidChannelName(name))
                 return BadRequest(new { Message = "Channel name must be 1-80 characters." });
             if (type == null)
-                return BadRequest(new { Message = "Channel type must be text or voice." });
+                return BadRequest(new { Message = "Channel type must be text, voice, or stage." });
             if (!string.IsNullOrWhiteSpace(request.CategoryId) &&
                 !await _context.Categories.AnyAsync(category => category.Id == request.CategoryId && category.ServerId == request.ServerId))
                 return BadRequest(new { Message = "Category does not belong to this server." });
@@ -590,7 +592,7 @@ namespace DiscordCloneServer.Controllers
             if (!IsValidChannelName(name))
                 return BadRequest(new { Message = "Channel name must be 1-80 characters." });
             if (type == null)
-                return BadRequest(new { Message = "Channel type must be text or voice." });
+                return BadRequest(new { Message = "Channel type must be text, voice, or stage." });
             if (!string.IsNullOrWhiteSpace(request.CategoryId) &&
                 !await _context.Categories.AnyAsync(category => category.Id == request.CategoryId && category.ServerId == channel.ServerId))
                 return BadRequest(new { Message = "Category does not belong to this server." });
@@ -601,6 +603,78 @@ namespace DiscordCloneServer.Controllers
 
             await _context.SaveChangesAsync();
             return Ok(channel);
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetChannelVoicePermissions(string channelId)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == channelId);
+            if (channel == null)
+                return NotFound(new { Message = "Channel not found." });
+
+            if (!await IsServerMember(channel.ServerId, currentUsername))
+                return Forbid();
+
+            if (!IsVoiceLikeChannelType(channel.Type))
+                return BadRequest(new { Message = "Permissions are only available for voice and stage channels." });
+
+            await EnsureDefaultRoles(channel.ServerId);
+            return Ok(await BuildChannelVoicePermissionsResponse(channel));
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> UpdateChannelVoicePermissions([FromBody] ChannelVoicePermissionsRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == request.ChannelId);
+            if (channel == null)
+                return NotFound(new { Message = "Channel not found." });
+
+            if (!await CanManageChannels(channel.ServerId, currentUsername))
+                return Forbid();
+
+            if (!IsVoiceLikeChannelType(channel.Type))
+                return BadRequest(new { Message = "Permissions are only available for voice and stage channels." });
+
+            await EnsureDefaultRoles(channel.ServerId);
+            var validRoleNames = (await _context.ServerRoles
+                    .Where(role => role.ServerId == channel.ServerId)
+                    .Select(role => role.Name)
+                    .ToListAsync())
+                .Select(NormalizeRoleName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var voiceAllowedRoles = NormalizeRequestedRoleNames(request.VoiceAllowedRoleNames, validRoleNames);
+            var stageSpeakerRoles = NormalizeRequestedRoleNames(request.StageSpeakerRoleNames, validRoleNames);
+
+            if (request.VoiceAccessRestricted && voiceAllowedRoles.Length == 0)
+            {
+                return BadRequest(new { Message = "At least one role must be allowed to connect." });
+            }
+
+            if (channel.Type == "stage" && request.StageSpeakerRestricted && stageSpeakerRoles.Length == 0)
+            {
+                return BadRequest(new { Message = "At least one role must be allowed to speak on stage." });
+            }
+
+            channel.VoiceAccessRestricted = request.VoiceAccessRestricted;
+            channel.VoiceAllowedRolesJson = request.VoiceAccessRestricted
+                ? SerializeRoleNames(voiceAllowedRoles)
+                : "[]";
+            channel.StageSpeakerRestricted = channel.Type == "stage" && request.StageSpeakerRestricted;
+            channel.StageSpeakerRolesJson = channel.StageSpeakerRestricted
+                ? SerializeRoleNames(stageSpeakerRoles)
+                : "[]";
+
+            await _context.SaveChangesAsync();
+            return Ok(await BuildChannelVoicePermissionsResponse(channel));
         }
 
         [HttpPost]
@@ -1345,6 +1419,34 @@ namespace DiscordCloneServer.Controllers
             }
         }
 
+        private async Task<object> BuildChannelVoicePermissionsResponse(Channel channel)
+        {
+            var roles = await _context.ServerRoles
+                .Where(role => role.ServerId == channel.ServerId)
+                .OrderBy(role => role.Position)
+                .ThenBy(role => role.Name)
+                .ToListAsync();
+
+            return new
+            {
+                channel.Id,
+                channel.ServerId,
+                channel.Name,
+                channel.Type,
+                channel.VoiceAccessRestricted,
+                VoiceAllowedRoleNames = DeserializeRoleNames(channel.VoiceAllowedRolesJson),
+                channel.StageSpeakerRestricted,
+                StageSpeakerRoleNames = DeserializeRoleNames(channel.StageSpeakerRolesJson),
+                Roles = roles.Select(role => new
+                {
+                    role.Id,
+                    Name = NormalizeRoleName(role.Name),
+                    role.Position,
+                    role.CanJoinVoice
+                })
+            };
+        }
+
         private static string NormalizeName(string? value)
         {
             return value?.Trim() ?? string.Empty;
@@ -1353,7 +1455,55 @@ namespace DiscordCloneServer.Controllers
         private static string? NormalizeChannelType(string? value)
         {
             var type = value?.Trim().ToLowerInvariant();
-            return type is "text" or "voice" ? type : null;
+            return type is "text" or "voice" or "stage" ? type : null;
+        }
+
+        private static bool IsVoiceLikeChannelType(string? value)
+        {
+            var type = value?.Trim().ToLowerInvariant();
+            return type is "voice" or "stage";
+        }
+
+        private static string[] DeserializeRoleNames(string? rolesJson)
+        {
+            if (string.IsNullOrWhiteSpace(rolesJson))
+            {
+                return Array.Empty<string>();
+            }
+
+            try
+            {
+                return (JsonSerializer.Deserialize<string[]>(rolesJson) ?? Array.Empty<string>())
+                    .Select(NormalizeRoleName)
+                    .Where(IsValidRoleName)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(role => role)
+                    .ToArray();
+            }
+            catch (JsonException)
+            {
+                return Array.Empty<string>();
+            }
+        }
+
+        private static string[] NormalizeRequestedRoleNames(IEnumerable<string>? requestedRoles, ISet<string> validRoleNames)
+        {
+            return (requestedRoles ?? Array.Empty<string>())
+                .Select(NormalizeRoleName)
+                .Where(role => IsValidRoleName(role) && validRoleNames.Contains(role))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(role => role)
+                .ToArray();
+        }
+
+        private static string SerializeRoleNames(IEnumerable<string> roleNames)
+        {
+            return JsonSerializer.Serialize(roleNames
+                .Select(NormalizeRoleName)
+                .Where(IsValidRoleName)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(role => role)
+                .ToArray());
         }
 
         private static bool IsValidServerName(string name)
@@ -1414,6 +1564,15 @@ namespace DiscordCloneServer.Controllers
     public class DeleteChannelRequest
     {
         public string ChannelId { get; set; } = string.Empty;
+    }
+
+    public class ChannelVoicePermissionsRequest
+    {
+        public string ChannelId { get; set; } = string.Empty;
+        public bool VoiceAccessRestricted { get; set; }
+        public string[] VoiceAllowedRoleNames { get; set; } = Array.Empty<string>();
+        public bool StageSpeakerRestricted { get; set; }
+        public string[] StageSpeakerRoleNames { get; set; } = Array.Empty<string>();
     }
 
     public class CategoryMutationRequest

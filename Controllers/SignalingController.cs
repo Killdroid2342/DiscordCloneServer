@@ -24,12 +24,12 @@ namespace DiscordCloneServer.Controllers
 
         [HttpPost]
         [EnableRateLimiting("abuse")]
-        public async Task<IActionResult> SendMessage([FromBody] SignalMessage message, string serverId, string toUser)
+        public async Task<IActionResult> SendMessage([FromBody] SignalMessage message, string serverId, string toUser, string? channelId = null)
         {
             var username = User.GetUsername();
             if (string.IsNullOrWhiteSpace(username))
                 return Unauthorized(new { message = "Missing user identity." });
-            if (!await CanJoinVoice(serverId, username) || !await CanJoinVoice(serverId, toUser))
+            if (!await CanJoinVoice(serverId, username, channelId) || !await CanJoinVoice(serverId, toUser, channelId))
                 return Forbid();
 
             message.From = username;
@@ -40,12 +40,12 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> ReceiveMessages(string serverId)
+        public async Task<IActionResult> ReceiveMessages(string serverId, string? channelId = null)
         {
             var currentUsername = User.GetUsername();
             if (string.IsNullOrWhiteSpace(currentUsername))
                 return Unauthorized(new { message = "Missing user identity." });
-            if (!await CanJoinVoice(serverId, currentUsername))
+            if (!await CanJoinVoice(serverId, currentUsername, channelId))
                 return Forbid();
 
             if (ServerMessages.TryGetValue(serverId, out var users) &&
@@ -60,12 +60,12 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpPost]
-        public async Task<IActionResult> JoinVoice(string serverId)
+        public async Task<IActionResult> JoinVoice(string serverId, string? channelId = null)
         {
             var currentUsername = User.GetUsername();
             if (string.IsNullOrWhiteSpace(currentUsername))
                 return Unauthorized(new { message = "Missing user identity." });
-            if (!await CanJoinVoice(serverId, currentUsername))
+            if (!await CanJoinVoice(serverId, currentUsername, channelId))
                 return Forbid();
 
             return Ok(VoiceWebSocketController.GetActiveUsersForServer(serverId));
@@ -84,12 +84,12 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetActiveUsers(string serverId)
+        public async Task<IActionResult> GetActiveUsers(string serverId, string? channelId = null)
         {
             var currentUsername = User.GetUsername();
             if (string.IsNullOrWhiteSpace(currentUsername))
                 return Unauthorized(new { message = "Missing user identity." });
-            if (!await CanJoinVoice(serverId, currentUsername))
+            if (!await CanJoinVoice(serverId, currentUsername, channelId))
                 return Forbid();
 
             return Ok(VoiceWebSocketController.GetActiveUsersForServer(serverId));
@@ -101,10 +101,20 @@ namespace DiscordCloneServer.Controllers
                 member.ServerId == serverId && member.Username == username);
         }
 
-        private async Task<bool> CanJoinVoice(string serverId, string username)
+        private async Task<bool> CanJoinVoice(string serverId, string username, string? channelId = null)
         {
             var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == serverId);
             if (server == null)
+            {
+                return false;
+            }
+
+            var channel = string.IsNullOrWhiteSpace(channelId)
+                ? null
+                : await _context.Channels.FirstOrDefaultAsync(channel =>
+                    channel.Id == channelId && channel.ServerId == serverId);
+            if (!string.IsNullOrWhiteSpace(channelId) &&
+                (channel == null || !IsVoiceLikeChannelType(channel.Type)))
             {
                 return false;
             }
@@ -134,7 +144,45 @@ namespace DiscordCloneServer.Controllers
             }
 
             var account = await _context.Accounts.FirstOrDefaultAsync(a => a.UserName == username && !a.IsDisabled);
-            return ServerVerificationPolicy.Evaluate(server.VerificationLevel, account, member).Allowed;
+            if (!ServerVerificationPolicy.Evaluate(server.VerificationLevel, account, member).Allowed)
+            {
+                return false;
+            }
+
+            if (channel is { VoiceAccessRestricted: true })
+            {
+                var allowedRoles = DeserializeRoleNames(channel.VoiceAllowedRolesJson);
+                return allowedRoles.Contains(roleName, StringComparer.OrdinalIgnoreCase);
+            }
+
+            return true;
+        }
+
+        private static bool IsVoiceLikeChannelType(string? value)
+        {
+            var type = value?.Trim().ToLowerInvariant();
+            return type is "voice" or "stage";
+        }
+
+        private static string[] DeserializeRoleNames(string? rolesJson)
+        {
+            if (string.IsNullOrWhiteSpace(rolesJson))
+            {
+                return Array.Empty<string>();
+            }
+
+            try
+            {
+                return (System.Text.Json.JsonSerializer.Deserialize<string[]>(rolesJson) ?? Array.Empty<string>())
+                    .Select(role => role.Trim().ToLowerInvariant().Replace(' ', '-'))
+                    .Where(role => role.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return Array.Empty<string>();
+            }
         }
     }
 }

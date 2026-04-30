@@ -113,8 +113,8 @@ namespace DiscordCloneServer.Controllers
                         await HandleIdentify(connection, connection.Username);
                         break;
                     case "join":
-                        if (messageObj.ServerId != null && await CanJoinVoice(messageObj.ServerId, connection.Username))
-                            await HandleJoinVoice(connection, messageObj.ServerId, connection.Username);
+                        if (messageObj.ServerId != null && await CanJoinVoice(messageObj.ServerId, connection.Username, messageObj.ChannelId))
+                            await HandleJoinVoice(connection, messageObj.ServerId, connection.Username, messageObj.ChannelId);
                         break;
                     case "leave":
                         if (messageObj.ServerId != null)
@@ -194,10 +194,20 @@ namespace DiscordCloneServer.Controllers
                 member.ServerId == serverId && member.Username == username);
         }
 
-        private async Task<bool> CanJoinVoice(string serverId, string username)
+        private async Task<bool> CanJoinVoice(string serverId, string username, string? channelId = null)
         {
             var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == serverId);
             if (server == null)
+            {
+                return false;
+            }
+
+            var channel = string.IsNullOrWhiteSpace(channelId)
+                ? null
+                : await _context.Channels.FirstOrDefaultAsync(channel =>
+                    channel.Id == channelId && channel.ServerId == serverId);
+            if (!string.IsNullOrWhiteSpace(channelId) &&
+                (channel == null || !IsVoiceLikeChannelType(channel.Type)))
             {
                 return false;
             }
@@ -227,7 +237,45 @@ namespace DiscordCloneServer.Controllers
             }
 
             var account = await _context.Accounts.FirstOrDefaultAsync(a => a.UserName == username && !a.IsDisabled);
-            return ServerVerificationPolicy.Evaluate(server.VerificationLevel, account, member).Allowed;
+            if (!ServerVerificationPolicy.Evaluate(server.VerificationLevel, account, member).Allowed)
+            {
+                return false;
+            }
+
+            if (channel is { VoiceAccessRestricted: true })
+            {
+                var allowedRoles = DeserializeRoleNames(channel.VoiceAllowedRolesJson);
+                return allowedRoles.Contains(roleName, StringComparer.OrdinalIgnoreCase);
+            }
+
+            return true;
+        }
+
+        private static bool IsVoiceLikeChannelType(string? value)
+        {
+            var type = value?.Trim().ToLowerInvariant();
+            return type is "voice" or "stage";
+        }
+
+        private static string[] DeserializeRoleNames(string? rolesJson)
+        {
+            if (string.IsNullOrWhiteSpace(rolesJson))
+            {
+                return Array.Empty<string>();
+            }
+
+            try
+            {
+                return (JsonSerializer.Deserialize<string[]>(rolesJson) ?? Array.Empty<string>())
+                    .Select(role => role.Trim().ToLowerInvariant().Replace(' ', '-'))
+                    .Where(role => role.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+            catch (JsonException)
+            {
+                return Array.Empty<string>();
+            }
         }
 
         private List<string> GetUsersForServerSnapshot(string serverId)
@@ -374,7 +422,7 @@ namespace DiscordCloneServer.Controllers
             });
         }
 
-        private async Task HandleJoinVoice(WebSocketConnection connection, string serverId, string username)
+        private async Task HandleJoinVoice(WebSocketConnection connection, string serverId, string username, string? channelId = null)
         {
             if (UserToServer.TryGetValue(username, out var previousServerId) &&
                 !string.IsNullOrWhiteSpace(previousServerId) &&
@@ -412,6 +460,7 @@ namespace DiscordCloneServer.Controllers
                 {
                     Type = "user-joined",
                     ServerId = serverId,
+                    ChannelId = channelId,
                     Username = username
                 }, connection.Id);
             }
@@ -421,6 +470,7 @@ namespace DiscordCloneServer.Controllers
             {
                 Type = "existing-users",
                 ServerId = serverId,
+                ChannelId = channelId,
                 Data = JsonSerializer.Serialize(existingUsers)
             });
 
@@ -759,6 +809,7 @@ namespace DiscordCloneServer.Controllers
         public string Type { get; set; } = string.Empty;
         public string? Username { get; set; }
         public string? ServerId { get; set; }
+        public string? ChannelId { get; set; }
         public string? TargetUser { get; set; }
         public string? Data { get; set; }
         public bool IsPrivate { get; set; }
