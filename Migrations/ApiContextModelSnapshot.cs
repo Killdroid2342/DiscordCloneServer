@@ -289,9 +289,31 @@ namespace DiscordCloneServer.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<bool>("StageSpeakerRestricted")
+                        .ValueGeneratedOnAdd()
+                        .HasDefaultValue(false)
+                        .HasColumnType("bit");
+
+                    b.Property<string>("StageSpeakerRolesJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("nvarchar(max)")
+                        .HasDefaultValue("[]");
+
                     b.Property<string>("Type")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("VoiceAccessRestricted")
+                        .ValueGeneratedOnAdd()
+                        .HasDefaultValue(false)
+                        .HasColumnType("bit");
+
+                    b.Property<string>("VoiceAllowedRolesJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("nvarchar(max)")
+                        .HasDefaultValue("[]");
 
                     b.HasKey("Id");
 

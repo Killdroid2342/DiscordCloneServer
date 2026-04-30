@@ -154,6 +154,20 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<PrivateMessageFriend>().ToTable("Private_Message_Friend");
             modelBuilder.Entity<ServerMember>().ToTable("Server_Members");
             modelBuilder.Entity<Channel>().ToTable("Channels");
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.VoiceAccessRestricted)
+                .HasDefaultValue(false);
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.VoiceAllowedRolesJson)
+                .HasColumnType("nvarchar(max)")
+                .HasDefaultValue("[]");
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.StageSpeakerRestricted)
+                .HasDefaultValue(false);
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.StageSpeakerRolesJson)
+                .HasColumnType("nvarchar(max)")
+                .HasDefaultValue("[]");
             modelBuilder.Entity<Category>().ToTable("Categories");
             modelBuilder.Entity<ServerRole>().ToTable("Server_Roles");
             modelBuilder.Entity<ServerRole>()
