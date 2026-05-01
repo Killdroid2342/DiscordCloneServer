@@ -38,6 +38,7 @@ namespace DiscordCloneServer.Controllers
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
         private readonly IHubContext<ChatHub> _hubContext;
+        private const int MaxModerationDurationMinutes = 60 * 24 * 28;
 
         public ServerController(ApiContext context, IConfiguration config, IHubContext<ChatHub> hubContext)
         {
@@ -135,6 +136,120 @@ namespace DiscordCloneServer.Controllers
                 log.DetailsJson,
                 log.CreatedAt
             };
+        }
+
+        private static bool IsMemberMuted(ServerMember member, DateTime now)
+        {
+            return member.IsMuted && (member.MutedUntil == null || member.MutedUntil > now);
+        }
+
+        private static DateTime? GetActiveMuteUntil(IEnumerable<ServerMember> members, DateTime now)
+        {
+            var activeMutes = members
+                .Where(member => IsMemberMuted(member, now))
+                .ToList();
+
+            if (!activeMutes.Any())
+            {
+                return null;
+            }
+
+            if (activeMutes.Any(member => member.MutedUntil == null))
+            {
+                return null;
+            }
+
+            return activeMutes
+                .Select(member => member.MutedUntil)
+                .Max();
+        }
+
+        private static DateTime? GetActiveTimeoutUntil(IEnumerable<ServerMember> members, DateTime now)
+        {
+            return members
+                .Select(member => member.TimedOutUntil)
+                .Where(until => until > now)
+                .OrderByDescending(until => until)
+                .FirstOrDefault();
+        }
+
+        private sealed class ServerMemberResponse
+        {
+            public string Id { get; set; } = string.Empty;
+            public string Username { get; set; } = string.Empty;
+            public string Role { get; set; } = "user";
+            public bool IsMuted { get; set; }
+            public DateTime? MutedUntil { get; set; }
+            public bool IsTimedOut { get; set; }
+            public DateTime? TimedOutUntil { get; set; }
+        }
+
+        private static ServerMemberResponse BuildMemberResponse(ServerMember member, string username, string role, DateTime now)
+        {
+            var entries = new[] { member };
+            var isMuted = entries.Any(entry => IsMemberMuted(entry, now));
+            var timeoutUntil = GetActiveTimeoutUntil(entries, now);
+
+            return new ServerMemberResponse
+            {
+                Id = member.Id,
+                Username = username,
+                Role = role,
+                IsMuted = isMuted,
+                MutedUntil = isMuted ? GetActiveMuteUntil(entries, now) : null,
+                IsTimedOut = timeoutUntil != null,
+                TimedOutUntil = timeoutUntil
+            };
+        }
+
+        private static ServerMemberResponse BuildMemberResponse(IGrouping<string, ServerMember> group, DateTime now)
+        {
+            var entries = group.ToList();
+            var ownerEntry = entries.FirstOrDefault(member => member.Role == "owner");
+            var chosenEntry = ownerEntry ?? entries.OrderBy(member => member.Id).First();
+            var isMuted = entries.Any(member => IsMemberMuted(member, now));
+            var timeoutUntil = GetActiveTimeoutUntil(entries, now);
+
+            return new ServerMemberResponse
+            {
+                Id = chosenEntry.Id,
+                Username = group.Key,
+                Role = ownerEntry != null ? "owner" : chosenEntry.Role,
+                IsMuted = isMuted,
+                MutedUntil = isMuted ? GetActiveMuteUntil(entries, now) : null,
+                IsTimedOut = timeoutUntil != null,
+                TimedOutUntil = timeoutUntil
+            };
+        }
+
+        private static bool TryGetModerationUntil(
+            int? durationMinutes,
+            bool allowIndefinite,
+            out DateTime? until,
+            out string? message)
+        {
+            until = null;
+            message = null;
+
+            if (durationMinutes == null)
+            {
+                if (allowIndefinite)
+                {
+                    return true;
+                }
+
+                message = "Duration is required.";
+                return false;
+            }
+
+            if (durationMinutes is < 1 or > MaxModerationDurationMinutes)
+            {
+                message = $"Duration must be between 1 minute and {MaxModerationDurationMinutes} minutes.";
+                return false;
+            }
+
+            until = DateTime.UtcNow.AddMinutes(durationMinutes.Value);
+            return true;
         }
 
         private static string? BuildAuditDetailsJson(object? details)
@@ -538,20 +653,10 @@ namespace DiscordCloneServer.Controllers
                 .Where(m => m.ServerId == serverId)
                 .ToListAsync();
 
+            var now = DateTime.UtcNow;
             var dedupedMembers = members
                 .GroupBy(member => member.Username)
-                .Select(group =>
-                {
-                    var ownerEntry = group.FirstOrDefault(member => member.Role == "owner");
-                    var chosenEntry = ownerEntry ?? group.OrderBy(member => member.Id).First();
-
-                    return new
-                    {
-                        chosenEntry.Id,
-                        Username = group.Key,
-                        Role = ownerEntry != null ? "owner" : chosenEntry.Role
-                    };
-                })
+                .Select(group => BuildMemberResponse(group, now))
                 .OrderBy(member => member.Role == "owner" ? 0 : 1)
                 .ThenBy(member => member.Username)
                 .ToList();
@@ -1160,6 +1265,154 @@ namespace DiscordCloneServer.Controllers
             return Ok(new { Message = "Member unbanned." });
         }
 
+        [HttpPost]
+        [EnableRateLimiting("abuse")]
+        public async Task<IActionResult> MuteMember([FromBody] MemberModerationRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageMembers(request.ServerId, currentUsername))
+                return Forbid();
+
+            if (!TryGetModerationUntil(request.DurationMinutes, allowIndefinite: true, out var mutedUntil, out var durationMessage))
+                return BadRequest(new { Message = durationMessage });
+
+            var target = await GetModerationTarget(request, "muted");
+            if (target.Error != null)
+                return target.Error;
+
+            foreach (var member in target.Memberships)
+            {
+                member.IsMuted = true;
+                member.MutedUntil = mutedUntil;
+            }
+
+            AddAuditLog(
+                request.ServerId,
+                "member_muted",
+                currentUsername,
+                "member",
+                target.TargetUsername,
+                target.TargetUsername,
+                new
+                {
+                    Reason = request.Reason?.Trim(),
+                    request.DurationMinutes,
+                    MutedUntil = mutedUntil
+                });
+            await _context.SaveChangesAsync();
+            await _hubContext.Clients.Group(request.ServerId).SendAsync("MemberModerationUpdated", request.ServerId, target.TargetUsername);
+            return Ok(new { Message = "Member muted.", MutedUntil = mutedUntil });
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> UnmuteMember([FromBody] MemberModerationRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageMembers(request.ServerId, currentUsername))
+                return Forbid();
+
+            var target = await GetModerationTarget(request, "unmuted");
+            if (target.Error != null)
+                return target.Error;
+
+            foreach (var member in target.Memberships)
+            {
+                member.IsMuted = false;
+                member.MutedUntil = null;
+            }
+
+            AddAuditLog(
+                request.ServerId,
+                "member_unmuted",
+                currentUsername,
+                "member",
+                target.TargetUsername,
+                target.TargetUsername,
+                new { Reason = request.Reason?.Trim() });
+            await _context.SaveChangesAsync();
+            await _hubContext.Clients.Group(request.ServerId).SendAsync("MemberModerationUpdated", request.ServerId, target.TargetUsername);
+            return Ok(new { Message = "Member unmuted." });
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("abuse")]
+        public async Task<IActionResult> TimeoutMember([FromBody] MemberModerationRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageMembers(request.ServerId, currentUsername))
+                return Forbid();
+
+            if (!TryGetModerationUntil(request.DurationMinutes, allowIndefinite: false, out var timedOutUntil, out var durationMessage))
+                return BadRequest(new { Message = durationMessage });
+
+            var target = await GetModerationTarget(request, "timed out");
+            if (target.Error != null)
+                return target.Error;
+
+            foreach (var member in target.Memberships)
+            {
+                member.TimedOutUntil = timedOutUntil;
+            }
+
+            AddAuditLog(
+                request.ServerId,
+                "member_timed_out",
+                currentUsername,
+                "member",
+                target.TargetUsername,
+                target.TargetUsername,
+                new
+                {
+                    Reason = request.Reason?.Trim(),
+                    request.DurationMinutes,
+                    TimedOutUntil = timedOutUntil
+                });
+            await _context.SaveChangesAsync();
+            await _hubContext.Clients.Group(request.ServerId).SendAsync("MemberModerationUpdated", request.ServerId, target.TargetUsername);
+            return Ok(new { Message = "Member timed out.", TimedOutUntil = timedOutUntil });
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ClearMemberTimeout([FromBody] MemberModerationRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageMembers(request.ServerId, currentUsername))
+                return Forbid();
+
+            var target = await GetModerationTarget(request, "restored");
+            if (target.Error != null)
+                return target.Error;
+
+            foreach (var member in target.Memberships)
+            {
+                member.TimedOutUntil = null;
+            }
+
+            AddAuditLog(
+                request.ServerId,
+                "member_timeout_cleared",
+                currentUsername,
+                "member",
+                target.TargetUsername,
+                target.TargetUsername,
+                new { Reason = request.Reason?.Trim() });
+            await _context.SaveChangesAsync();
+            await _hubContext.Clients.Group(request.ServerId).SendAsync("MemberModerationUpdated", request.ServerId, target.TargetUsername);
+            return Ok(new { Message = "Member timeout cleared." });
+        }
+
         [HttpGet]
         public async Task<IActionResult> GetBans(string serverId)
         {
@@ -1188,20 +1441,15 @@ namespace DiscordCloneServer.Controllers
                 return Forbid();
 
             query = query?.Trim() ?? string.Empty;
+            var now = DateTime.UtcNow;
             var members = await _context.ServerMembers
                 .Where(member => member.ServerId == serverId)
                 .Where(member => query == string.Empty || member.Username.Contains(query))
                 .OrderBy(member => member.Username)
                 .Take(50)
-                .Select(member => new
-                {
-                    member.Id,
-                    member.Username,
-                    member.Role
-                })
                 .ToListAsync();
 
-            return Ok(members);
+            return Ok(members.Select(member => BuildMemberResponse(member, member.Username, member.Role, now)));
         }
 
         [HttpGet]
@@ -1518,6 +1766,43 @@ namespace DiscordCloneServer.Controllers
         private string? GetCurrentUsername()
         {
             return User.GetUsername();
+        }
+
+        private async Task<(IActionResult? Error, string TargetUsername, List<ServerMember> Memberships)> GetModerationTarget(
+            MemberModerationRequest request,
+            string ownerAction)
+        {
+            if (string.IsNullOrWhiteSpace(request.ServerId))
+            {
+                return (BadRequest(new { Message = "Server id is required." }), string.Empty, new List<ServerMember>());
+            }
+
+            var targetUsername = request.TargetUsername?.Trim();
+            if (string.IsNullOrWhiteSpace(targetUsername))
+            {
+                return (BadRequest(new { Message = "Target username is required." }), string.Empty, new List<ServerMember>());
+            }
+
+            var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == request.ServerId);
+            if (server == null)
+            {
+                return (NotFound(new { Message = "Server not found." }), targetUsername, new List<ServerMember>());
+            }
+
+            if (string.Equals(server.ServerOwner, targetUsername, StringComparison.OrdinalIgnoreCase))
+            {
+                return (BadRequest(new { Message = $"The server owner cannot be {ownerAction}." }), targetUsername, new List<ServerMember>());
+            }
+
+            var memberships = await _context.ServerMembers
+                .Where(member => member.ServerId == request.ServerId && member.Username == targetUsername)
+                .ToListAsync();
+            if (!memberships.Any())
+            {
+                return (NotFound(new { Message = "Member not found." }), targetUsername, memberships);
+            }
+
+            return (null, targetUsername, memberships);
         }
 
         private async Task<bool> IsServerMember(string serverId, string username)
@@ -1865,6 +2150,7 @@ namespace DiscordCloneServer.Controllers
         public string ServerId { get; set; } = string.Empty;
         public string TargetUsername { get; set; } = string.Empty;
         public string? Reason { get; set; }
+        public int? DurationMinutes { get; set; }
     }
 
     public class ReorderCategoriesRequest
