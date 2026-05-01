@@ -55,6 +55,10 @@ namespace DiscordCloneServer.Controllers
             if (channel.Type != "text")
                 return BadRequest(new { message = "Messages can only be sent to text channels." });
 
+            var communicationRestriction = await GetCommunicationRestriction(channel.ServerId, username);
+            if (communicationRestriction != null)
+                return StatusCode(StatusCodes.Status403Forbidden, new { message = communicationRestriction });
+
             if (!await CanSendMessages(channel.ServerId, username))
                 return Forbid();
 
@@ -263,6 +267,10 @@ namespace DiscordCloneServer.Controllers
             if (channel == null || !await IsServerMember(channel.ServerId, username))
                 return Forbid();
 
+            var communicationRestriction = await GetCommunicationRestriction(channel.ServerId, username);
+            if (communicationRestriction != null)
+                return StatusCode(StatusCodes.Status403Forbidden, new { message = communicationRestriction });
+
             var emoji = NormalizeEmoji(request.Emoji);
             if (emoji == null)
                 return BadRequest(new { message = "Emoji is required." });
@@ -396,6 +404,11 @@ namespace DiscordCloneServer.Controllers
                 return false;
             }
 
+            if (IsMemberCommunicationRestricted(member, DateTime.UtcNow, includeMute: true))
+            {
+                return false;
+            }
+
             var roleName = member.Role?.Trim().ToLowerInvariant() ?? "user";
             if (roleName is "owner" or "admin" or "moderator")
             {
@@ -404,6 +417,47 @@ namespace DiscordCloneServer.Controllers
 
             var role = await _context.ServerRoles.FirstOrDefaultAsync(r => r.ServerId == serverId && r.Name == roleName);
             return role?.CanSendMessages ?? true;
+        }
+
+        private async Task<string?> GetCommunicationRestriction(string serverId, string username)
+        {
+            var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == serverId);
+            if (server?.ServerOwner == username)
+            {
+                return null;
+            }
+
+            var member = await _context.ServerMembers.FirstOrDefaultAsync(m =>
+                m.ServerId == serverId && m.Username == username);
+            if (member == null)
+            {
+                return null;
+            }
+
+            var now = DateTime.UtcNow;
+            if (member.TimedOutUntil is { } timedOutUntil && timedOutUntil > now)
+            {
+                return $"You are timed out until {timedOutUntil:O}.";
+            }
+
+            if (member.IsMuted && (member.MutedUntil == null || member.MutedUntil > now))
+            {
+                return member.MutedUntil == null
+                    ? "You are muted in this server."
+                    : $"You are muted until {member.MutedUntil:O}.";
+            }
+
+            return null;
+        }
+
+        private static bool IsMemberCommunicationRestricted(ServerMember member, DateTime now, bool includeMute)
+        {
+            if (member.TimedOutUntil is { } timedOutUntil && timedOutUntil > now)
+            {
+                return true;
+            }
+
+            return includeMute && member.IsMuted && (member.MutedUntil == null || member.MutedUntil > now);
         }
 
         private async Task<ServerVerificationResult> GetServerVerificationResult(string serverId, string username)
