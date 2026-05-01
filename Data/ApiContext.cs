@@ -23,6 +23,7 @@ namespace DiscordCloneServer.Data
         public DbSet<UnreadState> UnreadStates { get; set; }
         public DbSet<ContactVerification> ContactVerifications { get; set; }
         public DbSet<ServerAuditLog> ServerAuditLogs { get; set; }
+        public DbSet<UserReport> UserReports { get; set; }
 
         public ApiContext(DbContextOptions<ApiContext> options)
             : base(options)
@@ -154,6 +155,9 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<ServerMessage>().ToTable("Server_Message");
             modelBuilder.Entity<PrivateMessageFriend>().ToTable("Private_Message_Friend");
             modelBuilder.Entity<ServerMember>().ToTable("Server_Members");
+            modelBuilder.Entity<ServerMember>()
+                .Property(member => member.IsMuted)
+                .HasDefaultValue(false);
             modelBuilder.Entity<Channel>().ToTable("Channels");
             modelBuilder.Entity<Channel>()
                 .Property(channel => channel.VoiceAccessRestricted)
@@ -230,6 +234,54 @@ namespace DiscordCloneServer.Data
                 .HasColumnType("nvarchar(max)");
             modelBuilder.Entity<ServerAuditLog>()
                 .HasIndex(log => new { log.ServerId, log.CreatedAt });
+
+            modelBuilder.Entity<UserReport>().ToTable("User_Reports");
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.ScopeType)
+                .HasMaxLength(32);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.TargetType)
+                .HasMaxLength(32);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.ChannelId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.GroupId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.MessageId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.TargetUsername)
+                .HasMaxLength(256);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.ReportedByUsername)
+                .HasMaxLength(256);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.Reason)
+                .HasMaxLength(80);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.Description)
+                .HasMaxLength(1000);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.MessagePreview)
+                .HasMaxLength(500);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.Status)
+                .HasMaxLength(32);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.ReviewedByUsername)
+                .HasMaxLength(256);
+            modelBuilder.Entity<UserReport>()
+                .Property(report => report.ResolutionNote)
+                .HasMaxLength(1000);
+            modelBuilder.Entity<UserReport>()
+                .HasIndex(report => new { report.ServerId, report.Status, report.CreatedAt });
+            modelBuilder.Entity<UserReport>()
+                .HasIndex(report => new { report.ReportedByUsername, report.CreatedAt });
 
             base.OnModelCreating(modelBuilder);
             Console.WriteLine("database ready");
