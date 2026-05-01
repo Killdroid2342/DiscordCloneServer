@@ -15,11 +15,16 @@ namespace DiscordCloneServer.Controllers
     {
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
+        private readonly IEmailNotificationSender? _emailNotificationSender;
 
-        public ServerMessagesController(ApiContext context, IConfiguration config)
+        public ServerMessagesController(
+            ApiContext context,
+            IConfiguration config,
+            IEmailNotificationSender? emailNotificationSender = null)
         {
             _context = context;
             _config = config;
+            _emailNotificationSender = emailNotificationSender;
         }
 
         [HttpPost]
@@ -78,6 +83,7 @@ namespace DiscordCloneServer.Controllers
 
             _context.ServerMessages.Add(serverMessage);
             await _context.SaveChangesAsync();
+            await SendServerMentionEmailNotifications(serverMessage, channel);
             return Ok(BuildMessageResponse(serverMessage, Array.Empty<MessageReaction>()));
         }
 
@@ -350,15 +356,17 @@ namespace DiscordCloneServer.Controllers
             {
                 var state = states.FirstOrDefault(s => s.ScopeId == channel.Id);
                 var lastRead = state?.LastReadAt ?? DateTime.MinValue;
-                var unread = _context.ServerMessages
+                var unreadMessages = _context.ServerMessages
                     .Where(message => message.ChannelId == channel.Id && message.MessagesUserSender != username)
                     .AsEnumerable()
-                    .Count(message => ParseDate(message.Date) > lastRead);
+                    .Where(message => ParseDate(message.Date) > lastRead)
+                    .ToList();
 
                 return new
                 {
                     channelId = channel.Id,
-                    unread,
+                    unread = unreadMessages.Count,
+                    mentionCount = unreadMessages.Count(message => MentionsUser(message.userText, username)),
                     lastReadAt = state?.LastReadAt,
                     lastReadMessageId = state?.LastReadMessageId
                 };
@@ -428,6 +436,68 @@ namespace DiscordCloneServer.Controllers
             return await _context.MessageReactions
                 .Where(reaction => reaction.ScopeType == scopeType && reaction.MessageId == messageId)
                 .ToListAsync();
+        }
+
+        private async Task SendServerMentionEmailNotifications(Models.ServerMessage message, Channel channel)
+        {
+            if (_emailNotificationSender == null)
+            {
+                return;
+            }
+
+            var mentionNames = ExtractMentions(message.userText)
+                .Where(mention =>
+                    !mention.Equals("everyone", StringComparison.OrdinalIgnoreCase) &&
+                    !mention.Equals("here", StringComparison.OrdinalIgnoreCase) &&
+                    !mention.Equals(message.MessagesUserSender, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (mentionNames.Length == 0)
+            {
+                return;
+            }
+
+            var serverMemberNames = await _context.ServerMembers
+                .Where(member => member.ServerId == channel.ServerId)
+                .Select(member => member.Username)
+                .ToListAsync();
+            var recipientNames = serverMemberNames
+                .Where(member => mentionNames.Contains(member, StringComparer.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (recipientNames.Length == 0)
+            {
+                return;
+            }
+
+            var accounts = await _context.Accounts
+                .Where(account => !account.IsDisabled)
+                .ToListAsync();
+            var recipients = accounts
+                .Where(account => recipientNames.Contains(account.UserName, StringComparer.OrdinalIgnoreCase));
+
+            foreach (var recipient in recipients)
+            {
+                try
+                {
+                    await _emailNotificationSender.SendToAccountAsync(
+                        recipient,
+                        new EmailNotificationRequest(
+                            message.MessagesUserSender,
+                            $"{message.MessagesUserSender} mentioned you in #{channel.Name}",
+                            EmailNotificationPreferences.BuildPreview(message.userText, message.AttachmentUrl),
+                            "server",
+                            channel.Name,
+                            channel.Id,
+                            message.MessageID,
+                            ParseDate(message.Date)),
+                        HttpContext.RequestAborted);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"couldnt send server email notification: {ex.Message}");
+                }
+            }
         }
 
         private async Task<object> GetReactionSummary(string scopeType, string messageId)
@@ -501,6 +571,14 @@ namespace DiscordCloneServer.Controllers
                 .Select(match => match.Groups[1].Value)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+        }
+
+        private static bool MentionsUser(string? text, string username)
+        {
+            var mentions = ExtractMentions(text);
+            return mentions.Contains(username, StringComparer.OrdinalIgnoreCase) ||
+                   mentions.Contains("everyone", StringComparer.OrdinalIgnoreCase) ||
+                   mentions.Contains("here", StringComparer.OrdinalIgnoreCase);
         }
 
         private static DateTime ParseDate(string? date)
