@@ -131,6 +131,11 @@ namespace DiscordCloneServer.Controllers
                 return false;
             }
 
+            if (IsMemberTimedOut(member, DateTime.UtcNow))
+            {
+                return false;
+            }
+
             var roleName = member.Role?.Trim().ToLowerInvariant() ?? "user";
             if (roleName is "owner" or "admin" or "moderator")
             {
@@ -156,6 +161,11 @@ namespace DiscordCloneServer.Controllers
             }
 
             return true;
+        }
+
+        private static bool IsMemberTimedOut(ServerMember member, DateTime now)
+        {
+            return member.TimedOutUntil is { } timedOutUntil && timedOutUntil > now;
         }
 
         private static bool IsVoiceLikeChannelType(string? value)
