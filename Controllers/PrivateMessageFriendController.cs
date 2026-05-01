@@ -18,13 +18,18 @@ namespace DiscordCloneServer.Controllers
     {
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
+        private readonly IEmailNotificationSender? _emailNotificationSender;
 
         private static readonly ConcurrentDictionary<string, WebSocket> ActiveSockets = new();
 
-        public PrivateMessageFriendController(ApiContext context, IConfiguration config)
+        public PrivateMessageFriendController(
+            ApiContext context,
+            IConfiguration config,
+            IEmailNotificationSender? emailNotificationSender = null)
         {
             _context = context;
             _config = config;
+            _emailNotificationSender = emailNotificationSender;
         }
 
         [HttpPost]
@@ -67,6 +72,7 @@ namespace DiscordCloneServer.Controllers
 
             _context.PrivateMessageFriends.Add(privateMessageFriend);
             await _context.SaveChangesAsync();
+            await SendPrivateEmailNotification(privateMessageFriend);
             return Ok(BuildPrivateMessageResponse(privateMessageFriend, Array.Empty<MessageReaction>()));
         }
 
@@ -312,10 +318,14 @@ namespace DiscordCloneServer.Controllers
                     var scopeId = BuildDmScopeId(username, group.Key);
                     var state = states.FirstOrDefault(s => s.ScopeId == scopeId);
                     var lastReadAt = state?.LastReadAt ?? DateTime.MinValue;
+                    var unreadMessages = group
+                        .Where(message => ParseDate(message.Date) > lastReadAt)
+                        .ToList();
                     return new
                     {
                         targetUsername = group.Key,
-                        unread = group.Count(message => ParseDate(message.Date) > lastReadAt),
+                        unread = unreadMessages.Count,
+                        mentionCount = unreadMessages.Count(message => MentionsUser(message.FriendMessagesData, username)),
                         lastReadAt = state?.LastReadAt,
                         lastReadMessageId = state?.LastReadMessageId
                     };
@@ -397,6 +407,7 @@ namespace DiscordCloneServer.Controllers
 
                     _context.PrivateMessageFriends.Add(privateMessage);
                     await _context.SaveChangesAsync();
+                    await SendPrivateEmailNotification(privateMessage);
 
                     await SendPrivateSocketMessage(privateMessage.MessageUserReciver, privateMessage);
                 }
@@ -415,6 +426,43 @@ namespace DiscordCloneServer.Controllers
                 var responseJson = Newtonsoft.Json.JsonConvert.SerializeObject(privateMessage);
                 var messageBuffer = Encoding.UTF8.GetBytes(responseJson);
                 await receiverSocket.SendAsync(new ArraySegment<byte>(messageBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+        }
+
+        private async Task SendPrivateEmailNotification(PrivateMessageFriend privateMessage)
+        {
+            if (_emailNotificationSender == null)
+            {
+                return;
+            }
+
+            var recipient = await _context.Accounts.FirstOrDefaultAsync(account =>
+                account.UserName == privateMessage.MessageUserReciver && !account.IsDisabled);
+            if (recipient == null)
+            {
+                return;
+            }
+
+            try
+            {
+                await _emailNotificationSender.SendToAccountAsync(
+                    recipient,
+                    new EmailNotificationRequest(
+                        privateMessage.MessagesUserSender,
+                        $"New message from {privateMessage.MessagesUserSender}",
+                        EmailNotificationPreferences.BuildPreview(
+                            privateMessage.FriendMessagesData,
+                            privateMessage.AttachmentUrl),
+                        "dm",
+                        privateMessage.MessagesUserSender,
+                        BuildDmScopeId(privateMessage.MessagesUserSender, privateMessage.MessageUserReciver),
+                        privateMessage.PrivateMessageID,
+                        ParseDate(privateMessage.Date)),
+                    HttpContext.RequestAborted);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldnt send private email notification: {ex.Message}");
             }
         }
 
@@ -508,6 +556,7 @@ namespace DiscordCloneServer.Controllers
                 message.AttachmentUrl,
                 message.AttachmentContentType,
                 message.EditedAt,
+                Mentions = ExtractMentions(message.FriendMessagesData),
                 Reactions = SummarizeReactions(reactions)
             };
         }
@@ -536,6 +585,28 @@ namespace DiscordCloneServer.Controllers
         private static DateTime ParseDate(string? date)
         {
             return DateTime.TryParse(date, out var dt) ? dt : DateTime.MinValue;
+        }
+
+        private static string[] ExtractMentions(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return Array.Empty<string>();
+            }
+
+            return System.Text.RegularExpressions.Regex
+                .Matches(text, @"@([A-Za-z0-9_.-]{3,32})")
+                .Select(match => match.Groups[1].Value)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static bool MentionsUser(string? text, string username)
+        {
+            var mentions = ExtractMentions(text);
+            return mentions.Contains(username, StringComparer.OrdinalIgnoreCase) ||
+                   mentions.Contains("everyone", StringComparer.OrdinalIgnoreCase) ||
+                   mentions.Contains("here", StringComparer.OrdinalIgnoreCase);
         }
 
         private static bool IsValidAttachment(string? attachmentUrl)
