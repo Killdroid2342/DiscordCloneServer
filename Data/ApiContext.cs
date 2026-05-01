@@ -22,6 +22,7 @@ namespace DiscordCloneServer.Data
         public DbSet<MessageReaction> MessageReactions { get; set; }
         public DbSet<UnreadState> UnreadStates { get; set; }
         public DbSet<ContactVerification> ContactVerifications { get; set; }
+        public DbSet<ServerAuditLog> ServerAuditLogs { get; set; }
 
         public ApiContext(DbContextOptions<ApiContext> options)
             : base(options)
@@ -204,6 +205,31 @@ namespace DiscordCloneServer.Data
                 .HasMaxLength(128);
             modelBuilder.Entity<ContactVerification>()
                 .HasIndex(verification => new { verification.Username, verification.Kind, verification.ConsumedAt });
+
+            modelBuilder.Entity<ServerAuditLog>().ToTable("Server_Audit_Logs");
+            modelBuilder.Entity<ServerAuditLog>()
+                .Property(log => log.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerAuditLog>()
+                .Property(log => log.ActionType)
+                .HasMaxLength(64);
+            modelBuilder.Entity<ServerAuditLog>()
+                .Property(log => log.ActorUsername)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerAuditLog>()
+                .Property(log => log.TargetType)
+                .HasMaxLength(64);
+            modelBuilder.Entity<ServerAuditLog>()
+                .Property(log => log.TargetId)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerAuditLog>()
+                .Property(log => log.TargetUsername)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerAuditLog>()
+                .Property(log => log.DetailsJson)
+                .HasColumnType("nvarchar(max)");
+            modelBuilder.Entity<ServerAuditLog>()
+                .HasIndex(log => new { log.ServerId, log.CreatedAt });
 
             base.OnModelCreating(modelBuilder);
             Console.WriteLine("database ready");
