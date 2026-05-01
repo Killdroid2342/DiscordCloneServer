@@ -18,11 +18,15 @@ namespace DiscordCloneServer.Controllers
     public class GroupChatController : ControllerBase
     {
         private readonly ApiContext _context;
+        private readonly IEmailNotificationSender? _emailNotificationSender;
         private static readonly ConcurrentDictionary<string, WebSocket> ActiveSockets = new();
 
-        public GroupChatController(ApiContext context)
+        public GroupChatController(
+            ApiContext context,
+            IEmailNotificationSender? emailNotificationSender = null)
         {
             _context = context;
+            _emailNotificationSender = emailNotificationSender;
         }
 
         [HttpPost]
@@ -307,6 +311,7 @@ namespace DiscordCloneServer.Controllers
             _context.GroupMessages.Add(message);
             await _context.SaveChangesAsync();
             await BroadcastToGroup(message.GroupId, JsonSerializer.Serialize(message));
+            await SendGroupEmailNotifications(message);
             return Ok(BuildGroupMessageResponse(message, Array.Empty<MessageReaction>()));
         }
 
@@ -498,13 +503,17 @@ namespace DiscordCloneServer.Controllers
             {
                 var state = states.FirstOrDefault(s => s.ScopeId == group.Id.ToString());
                 var lastReadAt = state?.LastReadAt ?? DateTime.MinValue;
+                var unreadMessages = messages
+                    .Where(message =>
+                        message.GroupId == group.Id &&
+                        message.Sender != currentUsername &&
+                        ParseDate(message.Date) > lastReadAt)
+                    .ToList();
                 return new
                 {
                     groupId = group.Id,
-                    unread = messages.Count(message =>
-                        message.GroupId == group.Id &&
-                        message.Sender != currentUsername &&
-                        ParseDate(message.Date) > lastReadAt),
+                    unread = unreadMessages.Count,
+                    mentionCount = unreadMessages.Count(message => MentionsUser(message.Content, currentUsername)),
                     lastReadAt = state?.LastReadAt,
                     lastReadMessageId = state?.LastReadMessageId
                 };
@@ -603,6 +612,7 @@ namespace DiscordCloneServer.Controllers
                         await _context.SaveChangesAsync();
 
                         await BroadcastToGroup(groupMessage.GroupId, JsonSerializer.Serialize(groupMessage));
+                        await SendGroupEmailNotifications(groupMessage);
                         continue;
                     }
 
@@ -655,6 +665,56 @@ namespace DiscordCloneServer.Controllers
             {
                 var msgBuffer = Encoding.UTF8.GetBytes(messageJson);
                 await socket.SendAsync(new ArraySegment<byte>(msgBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+        }
+
+        private async Task SendGroupEmailNotifications(GroupMessage message)
+        {
+            if (_emailNotificationSender == null)
+            {
+                return;
+            }
+
+            var group = await _context.GroupChats.FirstOrDefaultAsync(g => g.Id == message.GroupId);
+            if (group == null)
+            {
+                return;
+            }
+
+            var recipientNames = group.Members
+                .Where(member => !string.Equals(member, message.Sender, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (recipientNames.Length == 0)
+            {
+                return;
+            }
+
+            var recipients = await _context.Accounts
+                .Where(account => recipientNames.Contains(account.UserName) && !account.IsDisabled)
+                .ToListAsync();
+
+            foreach (var recipient in recipients)
+            {
+                try
+                {
+                    await _emailNotificationSender.SendToAccountAsync(
+                        recipient,
+                        new EmailNotificationRequest(
+                            message.Sender,
+                            $"New message in {group.Name}",
+                            EmailNotificationPreferences.BuildPreview(message.Content, message.AttachmentUrl),
+                            "group",
+                            group.Name,
+                            group.Id.ToString(),
+                            message.Id.ToString(),
+                            ParseDate(message.Date)),
+                        HttpContext.RequestAborted);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"couldnt send group email notification: {ex.Message}");
+                }
             }
         }
 
@@ -775,6 +835,7 @@ namespace DiscordCloneServer.Controllers
                 message.AttachmentUrl,
                 message.AttachmentContentType,
                 message.EditedAt,
+                Mentions = ExtractMentions(message.Content),
                 Reactions = SummarizeReactions(reactions)
             };
         }
@@ -795,6 +856,28 @@ namespace DiscordCloneServer.Controllers
         private static DateTime ParseDate(string? date)
         {
             return DateTime.TryParse(date, out var dt) ? dt : DateTime.MinValue;
+        }
+
+        private static string[] ExtractMentions(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return Array.Empty<string>();
+            }
+
+            return System.Text.RegularExpressions.Regex
+                .Matches(text, @"@([A-Za-z0-9_.-]{3,32})")
+                .Select(match => match.Groups[1].Value)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static bool MentionsUser(string? text, string username)
+        {
+            var mentions = ExtractMentions(text);
+            return mentions.Contains(username, StringComparer.OrdinalIgnoreCase) ||
+                   mentions.Contains("everyone", StringComparer.OrdinalIgnoreCase) ||
+                   mentions.Contains("here", StringComparer.OrdinalIgnoreCase);
         }
 
         private static bool IsValidAttachment(string? attachmentUrl)
