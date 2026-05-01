@@ -91,6 +91,68 @@ namespace DiscordCloneServer.Controllers
             return $"{scheme}://{host}/invite/{code}";
         }
 
+        private void AddAuditLog(
+            string serverId,
+            string actionType,
+            string actorUsername,
+            string? targetType = null,
+            string? targetId = null,
+            string? targetUsername = null,
+            object? details = null)
+        {
+            if (string.IsNullOrWhiteSpace(serverId) ||
+                string.IsNullOrWhiteSpace(actionType) ||
+                string.IsNullOrWhiteSpace(actorUsername))
+            {
+                return;
+            }
+
+            _context.ServerAuditLogs.Add(new ServerAuditLog
+            {
+                Id = Guid.NewGuid().ToString(),
+                ServerId = serverId,
+                ActionType = actionType,
+                ActorUsername = actorUsername,
+                TargetType = NormalizeOptionalAuditValue(targetType),
+                TargetId = NormalizeOptionalAuditValue(targetId),
+                TargetUsername = NormalizeOptionalAuditValue(targetUsername),
+                DetailsJson = BuildAuditDetailsJson(details),
+                CreatedAt = DateTime.UtcNow
+            });
+        }
+
+        private static object BuildAuditLogResponse(ServerAuditLog log)
+        {
+            return new
+            {
+                log.Id,
+                log.ServerId,
+                log.ActionType,
+                log.ActorUsername,
+                log.TargetType,
+                log.TargetId,
+                log.TargetUsername,
+                log.DetailsJson,
+                log.CreatedAt
+            };
+        }
+
+        private static string? BuildAuditDetailsJson(object? details)
+        {
+            if (details == null)
+            {
+                return null;
+            }
+
+            return JsonSerializer.Serialize(details);
+        }
+
+        private static string? NormalizeOptionalAuditValue(string? value)
+        {
+            var normalized = value?.Trim();
+            return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+        }
+
 
         [HttpPost]
         public async Task<IActionResult> CreateServer([FromBody] CreateServer createServer)
@@ -166,6 +228,13 @@ namespace DiscordCloneServer.Controllers
             var townHallStage = new Channel { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, CategoryId = stageCategory.Id, Name = "Town Hall", Type = "stage", Position = 0 };
 
             _context.Channels.AddRange(generalText, generalVoice, townHallStage);
+            AddAuditLog(
+                createServer.ServerID,
+                "server_created",
+                currentUsername,
+                "server",
+                createServer.ServerID,
+                details: new { createServer.ServerName });
             await _context.SaveChangesAsync();
 
             return Ok(BuildServerResponse(createServer, "owner"));
@@ -490,6 +559,26 @@ namespace DiscordCloneServer.Controllers
             return Ok(dedupedMembers);
         }
 
+        [HttpGet]
+        public async Task<IActionResult> GetAuditLogs(string serverId, int take = 50)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageServer(serverId, currentUsername))
+                return Forbid();
+
+            take = Math.Clamp(take, 1, 100);
+            var logs = await _context.ServerAuditLogs
+                .Where(log => log.ServerId == serverId)
+                .OrderByDescending(log => log.CreatedAt)
+                .Take(take)
+                .ToListAsync();
+
+            return Ok(logs.Select(BuildAuditLogResponse));
+        }
+
         [HttpPost]
         public async Task<IActionResult> UpdateVerificationLevel([FromBody] ServerVerificationLevelRequest request)
         {
@@ -530,6 +619,20 @@ namespace DiscordCloneServer.Controllers
             {
                 server.RequireTwoFactorForModerators = request.RequireTwoFactorForModerators.Value;
             }
+            AddAuditLog(
+                request.ServerId,
+                "server_rules_updated",
+                currentUsername,
+                "server",
+                request.ServerId,
+                details: new
+                {
+                    server.VerificationLevel,
+                    server.RequireVerifiedEmail,
+                    server.MinimumAccountAgeMinutes,
+                    server.MinimumMembershipMinutes,
+                    server.RequireTwoFactorForModerators
+                });
             await _context.SaveChangesAsync();
 
             return Ok(BuildServerResponse(server, server.ServerOwner == currentUsername ? "owner" : "user"));
@@ -569,6 +672,13 @@ namespace DiscordCloneServer.Controllers
             };
 
             _context.Channels.Add(channel);
+            AddAuditLog(
+                request.ServerId,
+                "channel_created",
+                currentUsername,
+                "channel",
+                channel.Id,
+                details: new { channel.Name, channel.Type, channel.CategoryId });
             await _context.SaveChangesAsync();
             return Ok(channel);
         }
@@ -597,10 +707,22 @@ namespace DiscordCloneServer.Controllers
                 !await _context.Categories.AnyAsync(category => category.Id == request.CategoryId && category.ServerId == channel.ServerId))
                 return BadRequest(new { Message = "Category does not belong to this server." });
 
+            var previous = new { channel.Name, channel.Type, channel.CategoryId };
             channel.Name = name;
             channel.Type = type;
             channel.CategoryId = string.IsNullOrWhiteSpace(request.CategoryId) ? null : request.CategoryId;
 
+            AddAuditLog(
+                channel.ServerId,
+                "channel_updated",
+                currentUsername,
+                "channel",
+                channel.Id,
+                details: new
+                {
+                    Previous = previous,
+                    Current = new { channel.Name, channel.Type, channel.CategoryId }
+                });
             await _context.SaveChangesAsync();
             return Ok(channel);
         }
@@ -673,6 +795,21 @@ namespace DiscordCloneServer.Controllers
                 ? SerializeRoleNames(stageSpeakerRoles)
                 : "[]";
 
+            AddAuditLog(
+                channel.ServerId,
+                "channel_voice_permissions_updated",
+                currentUsername,
+                "channel",
+                channel.Id,
+                details: new
+                {
+                    channel.Name,
+                    channel.Type,
+                    channel.VoiceAccessRestricted,
+                    VoiceAllowedRoleNames = voiceAllowedRoles,
+                    channel.StageSpeakerRestricted,
+                    StageSpeakerRoleNames = stageSpeakerRoles
+                });
             await _context.SaveChangesAsync();
             return Ok(await BuildChannelVoicePermissionsResponse(channel));
         }
@@ -694,6 +831,13 @@ namespace DiscordCloneServer.Controllers
             var messages = await _context.ServerMessages.Where(message => message.ChannelId == channel.Id).ToListAsync();
             _context.ServerMessages.RemoveRange(messages);
             _context.Channels.Remove(channel);
+            AddAuditLog(
+                channel.ServerId,
+                "channel_deleted",
+                currentUsername,
+                "channel",
+                channel.Id,
+                details: new { channel.Name, channel.Type, MessageCount = messages.Count });
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Channel deleted." });
         }
@@ -723,6 +867,13 @@ namespace DiscordCloneServer.Controllers
             };
 
             _context.Categories.Add(category);
+            AddAuditLog(
+                request.ServerId,
+                "category_created",
+                currentUsername,
+                "category",
+                category.Id,
+                details: new { category.Name });
             await _context.SaveChangesAsync();
             return Ok(category);
         }
@@ -745,7 +896,15 @@ namespace DiscordCloneServer.Controllers
             if (!IsValidCategoryName(name))
                 return BadRequest(new { Message = "Category name must be 1-80 characters." });
 
+            var previousName = category.Name;
             category.Name = name;
+            AddAuditLog(
+                category.ServerId,
+                "category_updated",
+                currentUsername,
+                "category",
+                category.Id,
+                details: new { PreviousName = previousName, CurrentName = category.Name });
             await _context.SaveChangesAsync();
             return Ok(category);
         }
@@ -771,6 +930,13 @@ namespace DiscordCloneServer.Controllers
             }
 
             _context.Categories.Remove(category);
+            AddAuditLog(
+                category.ServerId,
+                "category_deleted",
+                currentUsername,
+                "category",
+                category.Id,
+                details: new { category.Name, DetachedChannelCount = channels.Count });
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Category deleted." });
         }
@@ -800,6 +966,11 @@ namespace DiscordCloneServer.Controllers
                 }
             }
 
+            AddAuditLog(
+                request.ServerId,
+                "categories_reordered",
+                currentUsername,
+                details: new { CategoryIds = request.CategoryIds ?? Array.Empty<string>() });
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Categories reordered." });
         }
@@ -832,6 +1003,13 @@ namespace DiscordCloneServer.Controllers
                 }
             }
 
+            AddAuditLog(
+                request.ServerId,
+                "channels_reordered",
+                currentUsername,
+                "category",
+                request.CategoryId,
+                details: new { request.CategoryId, ChannelIds = request.ChannelIds ?? Array.Empty<string>() });
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Channels reordered." });
         }
@@ -884,6 +1062,14 @@ namespace DiscordCloneServer.Controllers
                 return NotFound(new { Message = "Member not found." });
 
             _context.ServerMembers.RemoveRange(memberships);
+            AddAuditLog(
+                request.ServerId,
+                "member_kicked",
+                currentUsername,
+                "member",
+                targetUsername,
+                targetUsername,
+                new { Reason = request.Reason?.Trim() });
             await _context.SaveChangesAsync();
             await _hubContext.Clients.Group(request.ServerId).SendAsync("UserLeft", targetUsername);
             return Ok(new { Message = "Member kicked." });
@@ -929,6 +1115,14 @@ namespace DiscordCloneServer.Controllers
                 .Where(member => member.ServerId == request.ServerId && member.Username == targetUsername)
                 .ToListAsync();
             _context.ServerMembers.RemoveRange(memberships);
+            AddAuditLog(
+                request.ServerId,
+                "member_banned",
+                currentUsername,
+                "member",
+                targetUsername,
+                targetUsername,
+                new { Reason = request.Reason?.Trim() });
             await _context.SaveChangesAsync();
             await _hubContext.Clients.Group(request.ServerId).SendAsync("UserLeft", targetUsername);
             return Ok(new { Message = "Member banned." });
@@ -955,6 +1149,13 @@ namespace DiscordCloneServer.Controllers
                 return NotFound(new { Message = "Ban not found." });
 
             _context.ServerBans.RemoveRange(bans);
+            AddAuditLog(
+                request.ServerId,
+                "member_unbanned",
+                currentUsername,
+                "member",
+                targetUsername,
+                targetUsername);
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Member unbanned." });
         }
@@ -1041,6 +1242,7 @@ namespace DiscordCloneServer.Controllers
                 ? await _context.ServerRoles.FirstOrDefaultAsync(r => r.Id == request.RoleId && r.ServerId == request.ServerId)
                 : await _context.ServerRoles.FirstOrDefaultAsync(r => r.ServerId == request.ServerId && r.Name == roleName);
 
+            var isNewRole = role == null;
             if (role == null)
             {
                 role = new ServerRole
@@ -1061,6 +1263,23 @@ namespace DiscordCloneServer.Controllers
             role.CanSendMessages = request.CanSendMessages;
             role.CanJoinVoice = request.CanJoinVoice;
 
+            AddAuditLog(
+                request.ServerId,
+                isNewRole ? "role_created" : "role_updated",
+                currentUsername,
+                "role",
+                role.Id,
+                details: new
+                {
+                    role.Name,
+                    role.CanManageServer,
+                    role.CanManageChannels,
+                    role.CanManageMembers,
+                    role.CanBanMembers,
+                    role.CanCreateInvites,
+                    role.CanSendMessages,
+                    role.CanJoinVoice
+                });
             await _context.SaveChangesAsync();
             return Ok(role);
         }
@@ -1088,6 +1307,13 @@ namespace DiscordCloneServer.Controllers
             }
 
             _context.ServerRoles.Remove(role);
+            AddAuditLog(
+                request.ServerId,
+                "role_deleted",
+                currentUsername,
+                "role",
+                role.Id,
+                details: new { role.Name });
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Role deleted." });
         }
@@ -1126,7 +1352,16 @@ namespace DiscordCloneServer.Controllers
                 return BadRequest(new { Message = "This server requires 2FA before assigning moderator or admin permissions." });
             }
 
+            var previousRole = member.Role;
             member.Role = roleName;
+            AddAuditLog(
+                request.ServerId,
+                "member_role_updated",
+                currentUsername,
+                "member",
+                targetUsername,
+                targetUsername,
+                new { PreviousRole = previousRole, CurrentRole = roleName });
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Member role updated." });
         }
@@ -1164,6 +1399,13 @@ namespace DiscordCloneServer.Controllers
 
             _context.ServerInvites.Add(invite);
             server.InviteLink = BuildInviteLink(Request, invite.Code);
+            AddAuditLog(
+                request.ServerId,
+                "invite_created",
+                currentUsername,
+                "invite",
+                invite.Id,
+                details: new { invite.Code, invite.ExpiresAt, invite.MaxUses });
             await _context.SaveChangesAsync();
 
             return Ok(new
@@ -1224,6 +1466,13 @@ namespace DiscordCloneServer.Controllers
                 return Forbid();
 
             invite.RevokedAt ??= DateTime.UtcNow;
+            AddAuditLog(
+                invite.ServerId,
+                "invite_revoked",
+                currentUsername,
+                "invite",
+                invite.Id,
+                details: new { invite.Code });
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Invite revoked." });
         }
@@ -1247,12 +1496,21 @@ namespace DiscordCloneServer.Controllers
             if (!await IsServerMember(request.ServerId, targetUsername))
                 return BadRequest(new { Message = "Target user must be a server member." });
 
+            var previousOwner = server.ServerOwner;
             server.ServerOwner = targetUsername;
             foreach (var member in _context.ServerMembers.Where(member => member.ServerId == request.ServerId))
             {
                 member.Role = member.Username == targetUsername ? "owner" : "user";
             }
 
+            AddAuditLog(
+                request.ServerId,
+                "ownership_transferred",
+                currentUsername,
+                "member",
+                targetUsername,
+                targetUsername,
+                new { PreviousOwner = previousOwner, CurrentOwner = targetUsername });
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Ownership transferred." });
         }
