@@ -25,6 +25,18 @@ namespace DiscordCloneServer
                 "http://localhost:8080",
                 "null"
             };
+            var configuredOrigins = builder.Configuration
+                .GetSection("Cors:AllowedOrigins")
+                .Get<string[]>() ?? Array.Empty<string>();
+            var configuredOriginsCsv = builder.Configuration["Cors:AllowedOriginsCsv"] ?? string.Empty;
+            foreach (var origin in configuredOrigins.Concat(configuredOriginsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries)))
+            {
+                var normalizedOrigin = origin.Trim();
+                if (!string.IsNullOrWhiteSpace(normalizedOrigin))
+                {
+                    allowedOrigins.Add(normalizedOrigin);
+                }
+            }
 
 
             builder.Services.AddCors(options =>
