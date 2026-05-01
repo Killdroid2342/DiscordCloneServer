@@ -134,7 +134,14 @@ namespace DiscordCloneServer.Controllers
                 return null;
             }
 
-            return Uri.TryCreate(pageUri, value, out var resolved) ? resolved.ToString() : null;
+            if (!Uri.TryCreate(pageUri, value, out var resolved))
+            {
+                return null;
+            }
+
+            return resolved.Scheme == Uri.UriSchemeHttp || resolved.Scheme == Uri.UriSchemeHttps
+                ? resolved.ToString()
+                : null;
         }
 
         private static async Task<bool> IsPublicHttpUrl(Uri uri)
