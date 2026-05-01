@@ -37,20 +37,24 @@ namespace DiscordCloneServer.Migrations
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<int>("MinimumAccountAgeMinutes")
-                        .HasDefaultValue(0)
-                        .HasColumnType("int");
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
 
                     b.Property<int>("MinimumMembershipMinutes")
-                        .HasDefaultValue(0)
-                        .HasColumnType("int");
-
-                    b.Property<bool>("RequireVerifiedEmail")
-                        .HasDefaultValue(false)
-                        .HasColumnType("bit");
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
 
                     b.Property<bool>("RequireTwoFactorForModerators")
-                        .HasDefaultValue(false)
-                        .HasColumnType("bit");
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
+
+                    b.Property<bool>("RequireVerifiedEmail")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
 
                     b.Property<string>("ServerName")
                         .IsRequired()
@@ -78,10 +82,10 @@ namespace DiscordCloneServer.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("BackgroundColor")
+                    b.Property<string>("AuthenticatorSecretProtected")
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<string>("AuthenticatorSecretProtected")
+                    b.Property<string>("BackgroundColor")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("BlockedUsers")
@@ -291,8 +295,8 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<bool>("StageSpeakerRestricted")
                         .ValueGeneratedOnAdd()
-                        .HasDefaultValue(false)
-                        .HasColumnType("bit");
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
 
                     b.Property<string>("StageSpeakerRolesJson")
                         .IsRequired()
@@ -306,8 +310,8 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<bool>("VoiceAccessRestricted")
                         .ValueGeneratedOnAdd()
-                        .HasDefaultValue(false)
-                        .HasColumnType("bit");
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
 
                     b.Property<string>("VoiceAllowedRolesJson")
                         .IsRequired()
@@ -493,6 +497,51 @@ namespace DiscordCloneServer.Migrations
                     b.HasKey("PrivateMessageID");
 
                     b.ToTable("Private_Message_Friend", (string)null);
+                });
+
+            modelBuilder.Entity("DiscordCloneServer.Models.ServerAuditLog", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("ActionType")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("ActorUsername")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("DetailsJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ServerId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("TargetId")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("TargetType")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("TargetUsername")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ServerId", "CreatedAt");
+
+                    b.ToTable("Server_Audit_Logs", (string)null);
                 });
 
             modelBuilder.Entity("DiscordCloneServer.Models.ServerBan", b =>
