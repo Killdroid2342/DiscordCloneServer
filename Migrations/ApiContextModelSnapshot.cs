@@ -33,8 +33,17 @@ namespace DiscordCloneServer.Migrations
                     b.Property<string>("Description")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("DiscoveryCategory")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
                     b.Property<string>("InviteLink")
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsPublic")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
 
                     b.Property<int>("MinimumAccountAgeMinutes")
                         .ValueGeneratedOnAdd()
@@ -70,6 +79,8 @@ namespace DiscordCloneServer.Migrations
                         .HasColumnType("nvarchar(32)");
 
                     b.HasKey("ServerID");
+
+                    b.HasIndex("IsPublic", "DiscoveryCategory");
 
                     b.ToTable("Create_Server", (string)null);
                 });

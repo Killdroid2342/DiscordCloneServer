@@ -141,6 +141,14 @@ namespace DiscordCloneServer.Data
                 .Property(server => server.VerificationLevel)
                 .HasMaxLength(32);
             modelBuilder.Entity<CreateServer>()
+                .Property(server => server.IsPublic)
+                .HasDefaultValue(false);
+            modelBuilder.Entity<CreateServer>()
+                .Property(server => server.DiscoveryCategory)
+                .HasMaxLength(64);
+            modelBuilder.Entity<CreateServer>()
+                .HasIndex(server => new { server.IsPublic, server.DiscoveryCategory });
+            modelBuilder.Entity<CreateServer>()
                 .Property(server => server.RequireVerifiedEmail)
                 .HasDefaultValue(false);
             modelBuilder.Entity<CreateServer>()
