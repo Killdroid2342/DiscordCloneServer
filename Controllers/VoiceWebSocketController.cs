@@ -390,8 +390,6 @@ namespace DiscordCloneServer.Controllers
                 Data = JsonSerializer.Serialize(users)
             };
 
-            var messageJson = JsonSerializer.Serialize(message);
-            var messageBytes = Encoding.UTF8.GetBytes(messageJson);
             var targetConnections = new List<WebSocketConnection>();
 
             if (VoiceServerConnections.TryGetValue(serverId, out var voiceConnections))
@@ -414,11 +412,7 @@ namespace DiscordCloneServer.Controllers
                 .Where(c => c.WebSocket.State == WebSocketState.Open)
                 .GroupBy(c => c.Id)
                 .Select(group => group.First())
-                .Select(c => c.WebSocket.SendAsync(
-                    new ArraySegment<byte>(messageBytes),
-                    WebSocketMessageType.Text,
-                    true,
-                    CancellationToken.None));
+                .Select(c => SendToConnection(c, message));
 
             await Task.WhenAll(tasks);
         }
@@ -771,8 +765,6 @@ namespace DiscordCloneServer.Controllers
         {
             if (VoiceServerConnections.TryGetValue(serverId, out var connections))
             {
-                var messageJson = JsonSerializer.Serialize(message);
-                var messageBytes = Encoding.UTF8.GetBytes(messageJson);
                 List<WebSocketConnection> targetConnections;
 
                 lock (connections)
@@ -783,7 +775,7 @@ namespace DiscordCloneServer.Controllers
                 }
 
                 var tasks = targetConnections
-                    .Select(c => c.WebSocket.SendAsync(new ArraySegment<byte>(messageBytes), WebSocketMessageType.Text, true, CancellationToken.None));
+                    .Select(c => SendToConnection(c, message));
 
                 await Task.WhenAll(tasks);
             }
@@ -795,7 +787,15 @@ namespace DiscordCloneServer.Controllers
             {
                 var messageJson = JsonSerializer.Serialize(message);
                 var messageBytes = Encoding.UTF8.GetBytes(messageJson);
-                await connection.WebSocket.SendAsync(new ArraySegment<byte>(messageBytes), WebSocketMessageType.Text, true, CancellationToken.None);
+                try
+                {
+                    await connection.WebSocket.SendAsync(new ArraySegment<byte>(messageBytes), WebSocketMessageType.Text, true, CancellationToken.None);
+                }
+                catch (WebSocketException)
+                {
+                    connection.WebSocket.Abort();
+                    await HandleDisconnection(connection);
+                }
             }
         }
 

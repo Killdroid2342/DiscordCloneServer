@@ -13,6 +13,8 @@ public class CreateServer
     public string? InviteLink { get; set; }
     public DateTime? Date { get; set; }
     public string? Description { get; set; }
+    public bool IsPublic { get; set; }
+    public string? DiscoveryCategory { get; set; }
     public string VerificationLevel { get; set; } = "none";
     public bool RequireVerifiedEmail { get; set; }
     public int MinimumAccountAgeMinutes { get; set; }
