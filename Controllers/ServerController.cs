@@ -56,6 +56,9 @@ namespace DiscordCloneServer.Controllers
                 server.ServerOwner,
                 server.InviteLink,
                 server.Date,
+                server.Description,
+                server.IsPublic,
+                server.DiscoveryCategory,
                 VerificationLevel = ServerVerificationPolicy.NormalizeLevel(server.VerificationLevel),
                 RequireVerifiedEmail = server.RequireVerifiedEmail,
                 MinimumAccountAgeMinutes = ServerVerificationPolicy.NormalizeRequiredMinutes(server.MinimumAccountAgeMinutes),
@@ -63,6 +66,29 @@ namespace DiscordCloneServer.Controllers
                 RequireTwoFactorForModerators = server.RequireTwoFactorForModerators,
                 Role = role,
                 AlreadyMember = alreadyMember
+            };
+        }
+
+        private static object BuildPublicServerListingResponse(
+            CreateServer server,
+            int memberCount,
+            int channelCount,
+            bool alreadyMember)
+        {
+            return new
+            {
+                server.ServerID,
+                server.ServerName,
+                server.ServerOwner,
+                server.Description,
+                server.IsPublic,
+                server.DiscoveryCategory,
+                server.Date,
+                MemberCount = memberCount,
+                ChannelCount = channelCount,
+                AlreadyMember = alreadyMember,
+                VerificationLevel = ServerVerificationPolicy.NormalizeLevel(server.VerificationLevel),
+                RequireVerifiedEmail = server.RequireVerifiedEmail
             };
         }
 
@@ -296,6 +322,8 @@ namespace DiscordCloneServer.Controllers
             createServer.MinimumAccountAgeMinutes = 0;
             createServer.MinimumMembershipMinutes = 0;
             createServer.RequireTwoFactorForModerators = false;
+            createServer.IsPublic = false;
+            createServer.DiscoveryCategory = null;
             var defaultInviteCode = GenerateInviteCode();
             createServer.InviteLink = BuildInviteLink(Request, defaultInviteCode);
 
@@ -419,6 +447,148 @@ namespace DiscordCloneServer.Controllers
 
 
         [HttpGet]
+        public async Task<IActionResult> DiscoverServers(string? query = null, string? category = null, int take = 24)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (string.IsNullOrWhiteSpace(currentUsername))
+            {
+                return Unauthorized(new { Message = "Missing user identity." });
+            }
+
+            take = Math.Clamp(take, 1, 50);
+            var normalizedQuery = query?.Trim();
+            var normalizedCategory = NormalizeDiscoveryCategory(category);
+
+            var publicServersQuery = _context.CreateServers
+                .Where(server => server.IsPublic);
+
+            if (!string.IsNullOrWhiteSpace(normalizedCategory))
+            {
+                publicServersQuery = publicServersQuery.Where(server => server.DiscoveryCategory == normalizedCategory);
+            }
+
+            if (!string.IsNullOrWhiteSpace(normalizedQuery))
+            {
+                publicServersQuery = publicServersQuery.Where(server =>
+                    server.ServerName.Contains(normalizedQuery) ||
+                    (server.Description != null && server.Description.Contains(normalizedQuery)) ||
+                    (server.DiscoveryCategory != null && server.DiscoveryCategory.Contains(normalizedQuery)));
+            }
+
+            var publicServers = await publicServersQuery
+                .OrderByDescending(server => _context.ServerMembers.Count(member => member.ServerId == server.ServerID))
+                .ThenBy(server => server.ServerName)
+                .Take(take)
+                .ToListAsync();
+
+            var serverIds = publicServers
+                .Select(server => server.ServerID)
+                .Where(serverId => !string.IsNullOrWhiteSpace(serverId))
+                .Cast<string>()
+                .ToList();
+
+            var memberCounts = await _context.ServerMembers
+                .Where(member => serverIds.Contains(member.ServerId))
+                .GroupBy(member => member.ServerId)
+                .Select(group => new { ServerId = group.Key, Count = group.Count() })
+                .ToDictionaryAsync(item => item.ServerId, item => item.Count);
+
+            var channelCounts = await _context.Channels
+                .Where(channel => serverIds.Contains(channel.ServerId))
+                .GroupBy(channel => channel.ServerId)
+                .Select(group => new { ServerId = group.Key, Count = group.Count() })
+                .ToDictionaryAsync(item => item.ServerId, item => item.Count);
+
+            var joinedServerIds = await _context.ServerMembers
+                .Where(member => member.Username == currentUsername && serverIds.Contains(member.ServerId))
+                .Select(member => member.ServerId)
+                .Distinct()
+                .ToListAsync();
+            var joined = joinedServerIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return Ok(publicServers.Select(server =>
+            {
+                var serverId = server.ServerID ?? string.Empty;
+                return BuildPublicServerListingResponse(
+                    server,
+                    memberCounts.GetValueOrDefault(serverId),
+                    channelCounts.GetValueOrDefault(serverId),
+                    joined.Contains(serverId) || server.ServerOwner == currentUsername);
+            }));
+        }
+
+        [HttpGet]
+        public Task<IActionResult> PublicServers(string? query = null, string? category = null, int take = 24)
+        {
+            return DiscoverServers(query, category, take);
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> UpdatePublicListing([FromBody] PublicServerListingRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageServer(request.ServerId, currentUsername))
+                return Forbid();
+
+            var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == request.ServerId);
+            if (server == null)
+                return NotFound(new { Message = "Server not found." });
+
+            var description = NormalizeOptionalDescription(request.Description, 240);
+            var category = NormalizeDiscoveryCategory(request.DiscoveryCategory);
+            if (request.IsPublic && string.IsNullOrWhiteSpace(description))
+                return BadRequest(new { Message = "Public listings need a short description." });
+
+            server.IsPublic = request.IsPublic;
+            server.Description = description;
+            server.DiscoveryCategory = category;
+
+            AddAuditLog(
+                request.ServerId,
+                "public_listing_updated",
+                currentUsername,
+                "server",
+                request.ServerId,
+                details: new
+                {
+                    server.IsPublic,
+                    server.Description,
+                    server.DiscoveryCategory
+                });
+            await _context.SaveChangesAsync();
+
+            return Ok(BuildServerResponse(
+                server,
+                server.ServerOwner == currentUsername
+                    ? "owner"
+                    : await _context.ServerMembers
+                        .Where(member => member.ServerId == request.ServerId && member.Username == currentUsername)
+                        .Select(member => member.Role)
+                        .FirstOrDefaultAsync() ?? "user"));
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> JoinPublicServer([FromBody] ServerActionRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (string.IsNullOrWhiteSpace(currentUsername))
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == request.ServerId);
+            if (server == null || string.IsNullOrWhiteSpace(server.ServerID))
+                return NotFound(new { Message = "Server not found." });
+
+            if (!server.IsPublic)
+                return BadRequest(new { Message = "This server is not listed publicly." });
+
+            return await JoinServerCore(currentUsername, server);
+        }
+
+
+        [HttpGet]
         public async Task<IActionResult> GetInviteLink(string serverId)
         {
             var currentUsername = GetCurrentUsername();
@@ -502,90 +672,10 @@ namespace DiscordCloneServer.Controllers
             server ??= await _context.CreateServers
                 .FirstOrDefaultAsync(s => s.InviteLink == normalizedInviteLink);
 
-            if (server == null || string.IsNullOrWhiteSpace(server.ServerID))
+            if (server == null)
                 return NotFound(new { Message = "Server not found" });
 
-            if (await _context.ServerBans.AnyAsync(ban =>
-                    ban.ServerId == server.ServerID && ban.Username == normalizedUsername))
-            {
-                return Forbid();
-            }
-
-            var role = server.ServerOwner == normalizedUsername ? "owner" : "user";
-            var serverId = server.ServerID ?? throw new InvalidOperationException("ServerID is null");
-
-            var existingMemberships = await _context.ServerMembers
-                .Where(member => member.ServerId == serverId && member.Username == normalizedUsername)
-                .ToListAsync();
-
-            if (existingMemberships.Any())
-            {
-                var preservedMembership = existingMemberships
-                    .OrderByDescending(member => member.Role == "owner")
-                    .ThenBy(member => member.Id)
-                    .First();
-
-                var duplicateMemberships = existingMemberships
-                    .Where(member => member.Id != preservedMembership.Id)
-                    .ToList();
-
-                var didMutateMemberships = false;
-
-                if (preservedMembership.Role != role)
-                {
-                    preservedMembership.Role = role;
-                    didMutateMemberships = true;
-                }
-
-                if (duplicateMemberships.Any())
-                {
-                    _context.ServerMembers.RemoveRange(duplicateMemberships);
-                    didMutateMemberships = true;
-                }
-
-                if (didMutateMemberships)
-                {
-                    await _context.SaveChangesAsync();
-                }
-
-                return Ok(BuildServerResponse(server, role, alreadyMember: true));
-            }
-
-            if (server.ServerOwner != normalizedUsername)
-            {
-                var account = await _context.Accounts.FirstOrDefaultAsync(account =>
-                    account.UserName == normalizedUsername && !account.IsDisabled);
-                var joinVerification = ServerVerificationPolicy.EvaluateJoin(server, account);
-                if (!joinVerification.Allowed)
-                {
-                    return StatusCode(StatusCodes.Status403Forbidden, new
-                    {
-                        Message = joinVerification.Message,
-                        VerificationLevel = joinVerification.Level
-                    });
-                }
-            }
-
-            var membership = new ServerMember
-            {
-                Id = Guid.NewGuid().ToString(),
-                ServerId = serverId,
-                Username = normalizedUsername,
-                Role = role,
-                JoinedAt = DateTime.UtcNow
-            };
-
-            _context.ServerMembers.Add(membership);
-            if (invite != null)
-            {
-                invite.Uses += 1;
-            }
-            await _context.SaveChangesAsync();
-
-
-            await _hubContext.Clients.Group(serverId).SendAsync("NewMember", normalizedUsername);
-
-            return Ok(BuildServerResponse(server, role));
+            return await JoinServerCore(normalizedUsername, server, invite);
         }
 
 
@@ -1811,6 +1901,96 @@ namespace DiscordCloneServer.Controllers
                 member.ServerId == serverId && member.Username == username);
         }
 
+        private async Task<IActionResult> JoinServerCore(
+            string normalizedUsername,
+            CreateServer server,
+            ServerInvite? invite = null)
+        {
+            if (server == null || string.IsNullOrWhiteSpace(server.ServerID))
+                return NotFound(new { Message = "Server not found" });
+
+            if (await _context.ServerBans.AnyAsync(ban =>
+                    ban.ServerId == server.ServerID && ban.Username == normalizedUsername))
+            {
+                return Forbid();
+            }
+
+            var role = server.ServerOwner == normalizedUsername ? "owner" : "user";
+            var serverId = server.ServerID ?? throw new InvalidOperationException("ServerID is null");
+
+            var existingMemberships = await _context.ServerMembers
+                .Where(member => member.ServerId == serverId && member.Username == normalizedUsername)
+                .ToListAsync();
+
+            if (existingMemberships.Any())
+            {
+                var preservedMembership = existingMemberships
+                    .OrderByDescending(member => member.Role == "owner")
+                    .ThenBy(member => member.Id)
+                    .First();
+
+                var duplicateMemberships = existingMemberships
+                    .Where(member => member.Id != preservedMembership.Id)
+                    .ToList();
+
+                var didMutateMemberships = false;
+
+                if (preservedMembership.Role != role)
+                {
+                    preservedMembership.Role = role;
+                    didMutateMemberships = true;
+                }
+
+                if (duplicateMemberships.Any())
+                {
+                    _context.ServerMembers.RemoveRange(duplicateMemberships);
+                    didMutateMemberships = true;
+                }
+
+                if (didMutateMemberships)
+                {
+                    await _context.SaveChangesAsync();
+                }
+
+                return Ok(BuildServerResponse(server, role, alreadyMember: true));
+            }
+
+            if (server.ServerOwner != normalizedUsername)
+            {
+                var account = await _context.Accounts.FirstOrDefaultAsync(account =>
+                    account.UserName == normalizedUsername && !account.IsDisabled);
+                var joinVerification = ServerVerificationPolicy.EvaluateJoin(server, account);
+                if (!joinVerification.Allowed)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, new
+                    {
+                        Message = joinVerification.Message,
+                        VerificationLevel = joinVerification.Level
+                    });
+                }
+            }
+
+            var membership = new ServerMember
+            {
+                Id = Guid.NewGuid().ToString(),
+                ServerId = serverId,
+                Username = normalizedUsername,
+                Role = role,
+                JoinedAt = DateTime.UtcNow
+            };
+
+            _context.ServerMembers.Add(membership);
+            if (invite != null)
+            {
+                invite.Uses += 1;
+            }
+            await _context.SaveChangesAsync();
+
+            await _hubContext.Clients.Group(serverId).SendAsync("NewMember", normalizedUsername);
+
+            return Ok(BuildServerResponse(server, role));
+        }
+
         private async Task<bool> CanManageServer(string serverId, string username)
         {
             return await HasPermission(serverId, username, role => role.CanManageServer, requireModeratorTwoFactor: true);
@@ -2001,6 +2181,34 @@ namespace DiscordCloneServer.Controllers
             return type is "text" or "voice" or "stage" ? type : null;
         }
 
+        private static string? NormalizeDiscoveryCategory(string? value)
+        {
+            var category = value?.Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(category))
+            {
+                return null;
+            }
+
+            category = category.Replace(' ', '-');
+            return category.Length <= 64 &&
+                   category.All(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_')
+                ? category
+                : null;
+        }
+
+        private static string? NormalizeOptionalDescription(string? value, int maxLength)
+        {
+            var description = value?.Trim();
+            if (string.IsNullOrWhiteSpace(description))
+            {
+                return null;
+            }
+
+            return description.Length <= maxLength
+                ? description
+                : description[..maxLength];
+        }
+
         private static bool IsVoiceLikeChannelType(string? value)
         {
             var type = value?.Trim().ToLowerInvariant();
@@ -2133,6 +2341,14 @@ namespace DiscordCloneServer.Controllers
     public class ServerActionRequest
     {
         public string ServerId { get; set; } = string.Empty;
+    }
+
+    public class PublicServerListingRequest
+    {
+        public string ServerId { get; set; } = string.Empty;
+        public bool IsPublic { get; set; }
+        public string? Description { get; set; }
+        public string? DiscoveryCategory { get; set; }
     }
 
     public class ServerVerificationLevelRequest
