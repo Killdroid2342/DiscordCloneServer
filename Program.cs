@@ -4,7 +4,9 @@ using DiscordCloneServer.Services;
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
+using System.Globalization;
 using System.Threading.RateLimiting;
 
 namespace DiscordCloneServer
@@ -14,6 +16,14 @@ namespace DiscordCloneServer
         public static void Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
+
+            builder.Logging.Configure(options =>
+            {
+                options.ActivityTrackingOptions =
+                    ActivityTrackingOptions.TraceId |
+                    ActivityTrackingOptions.SpanId |
+                    ActivityTrackingOptions.ParentId;
+            });
 
             const string MyAllowSpecificOrigins = "_myAllowSpecificOrigins";
             var allowedOrigins = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -127,6 +137,11 @@ namespace DiscordCloneServer
                  };
              });
             builder.Services.AddControllers();
+            builder.Services.Configure<CleanupJobOptions>(
+                builder.Configuration.GetSection(CleanupJobOptions.SectionName));
+            builder.Services.AddScoped<CleanupJobRunner>();
+            builder.Services.AddHostedService<BackgroundCleanupService>();
+            builder.Services.AddSingleton<MonitoringMetrics>();
             builder.Services.AddHttpClient<IContactVerificationDelivery, ContactVerificationDelivery>();
             builder.Services.AddHttpClient<IEmailNotificationSender, EmailNotificationSender>();
             builder.Services.AddRateLimiter(options =>
@@ -134,51 +149,39 @@ namespace DiscordCloneServer
                 options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
                 options.OnRejected = async (context, cancellationToken) =>
                 {
+                    var retryAfterSeconds = 0;
+                    if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                    {
+                        retryAfterSeconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+                        context.HttpContext.Response.Headers.RetryAfter =
+                            retryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+                    }
+
+                    var logger = context.HttpContext.RequestServices
+                        .GetRequiredService<ILoggerFactory>()
+                        .CreateLogger("RateLimiting");
+                    logger.LogWarning(
+                        "Rate limit rejected {Method} {Path} for {UserOrIp}; retry after {RetryAfterSeconds}s",
+                        context.HttpContext.Request.Method,
+                        context.HttpContext.Request.Path.Value ?? "/",
+                        context.HttpContext.User.GetUsername() ??
+                            context.HttpContext.Connection.RemoteIpAddress?.ToString() ??
+                            "unknown",
+                        retryAfterSeconds);
+
                     context.HttpContext.Response.ContentType = "application/json";
                     await context.HttpContext.Response.WriteAsync(
-                        "{\"message\":\"Too many requests. Please slow down and try again shortly.\"}",
+                        $$"""{"message":"Too many requests. Please slow down and try again shortly.","retryAfterSeconds":{{retryAfterSeconds}}}""",
                         cancellationToken);
                 };
 
-                options.AddPolicy("auth", httpContext =>
-                    RateLimitPartition.GetFixedWindowLimiter(
-                        GetClientPartitionKey(httpContext, "auth"),
-                        _ => new FixedWindowRateLimiterOptions
-                        {
-                            PermitLimit = 8,
-                            Window = TimeSpan.FromMinutes(1),
-                            QueueLimit = 0
-                        }));
-
-                options.AddPolicy("friend", httpContext =>
-                    RateLimitPartition.GetFixedWindowLimiter(
-                        GetClientPartitionKey(httpContext, "friend"),
-                        _ => new FixedWindowRateLimiterOptions
-                        {
-                            PermitLimit = 30,
-                            Window = TimeSpan.FromMinutes(1),
-                            QueueLimit = 0
-                        }));
-
-                options.AddPolicy("upload", httpContext =>
-                    RateLimitPartition.GetFixedWindowLimiter(
-                        GetClientPartitionKey(httpContext, "upload"),
-                        _ => new FixedWindowRateLimiterOptions
-                        {
-                            PermitLimit = 12,
-                            Window = TimeSpan.FromMinutes(1),
-                            QueueLimit = 0
-                        }));
-
-                options.AddPolicy("abuse", httpContext =>
-                    RateLimitPartition.GetFixedWindowLimiter(
-                        GetClientPartitionKey(httpContext, "abuse"),
-                        _ => new FixedWindowRateLimiterOptions
-                        {
-                            PermitLimit = 120,
-                            Window = TimeSpan.FromMinutes(1),
-                            QueueLimit = 0
-                        }));
+                foreach (var policyName in RateLimitPolicies.Names)
+                {
+                    options.AddPolicy(policyName, httpContext =>
+                        RateLimitPartition.GetSlidingWindowLimiter(
+                            RateLimitPolicies.GetClientPartitionKey(httpContext, policyName),
+                            _ => RateLimitPolicies.CreateSlidingWindowOptions(builder.Configuration, policyName)));
+                }
             });
 
             
@@ -212,6 +215,7 @@ namespace DiscordCloneServer
 
                 app.UseCors(MyAllowSpecificOrigins);
 
+                app.UseMiddleware<RequestLoggingMiddleware>();
                 app.UseAuthentication();
                 app.UseRateLimiter();
                 app.UseAuthorization();
@@ -226,7 +230,7 @@ namespace DiscordCloneServer
                 app.MapControllers();
                 app.MapHub<Hubs.ChatHub>("/chatHub");
 
-                Console.WriteLine("starting discord server on http://localhost:5018");
+                app.Logger.LogInformation("Starting Discord server on {Url}", "http://localhost:5018");
                 app.Run();
             }
             catch (Exception ex)
@@ -236,8 +240,8 @@ namespace DiscordCloneServer
                     throw;
                 }
 
-                Console.WriteLine($"server startup failed: {ex.Message}");
-                Console.WriteLine($"error info: {ex.StackTrace}");
+                Console.Error.WriteLine($"server startup failed: {ex.Message}");
+                Console.Error.WriteLine($"error info: {ex.StackTrace}");
                 throw;
             }
 
@@ -263,18 +267,6 @@ namespace DiscordCloneServer
                 uri.Host.Equals("::1", StringComparison.OrdinalIgnoreCase);
 
             return isLoopbackHost && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
-        }
-
-        private static string GetClientPartitionKey(HttpContext httpContext, string policyName)
-        {
-            var username = httpContext.User.GetUsername();
-            if (!string.IsNullOrWhiteSpace(username))
-            {
-                return $"{policyName}:user:{username}";
-            }
-
-            var ipAddress = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-            return $"{policyName}:ip:{ipAddress}";
         }
 
     }
