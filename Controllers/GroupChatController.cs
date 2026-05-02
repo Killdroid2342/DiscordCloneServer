@@ -568,9 +568,15 @@ namespace DiscordCloneServer.Controllers
             if (HttpContext.WebSockets.IsWebSocketRequest)
             {
                 var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
-                ActiveSockets[currentUsername] = webSocket;
-                await ListenForMessages(currentUsername, webSocket);
-                ActiveSockets.TryRemove(currentUsername, out _);
+                await ReplaceActiveSocket(currentUsername, webSocket);
+                try
+                {
+                    await ListenForMessages(currentUsername, webSocket);
+                }
+                finally
+                {
+                    RemoveActiveSocket(currentUsername, webSocket);
+                }
             }
             else
             {
@@ -664,8 +670,44 @@ namespace DiscordCloneServer.Controllers
             if (ActiveSockets.TryGetValue(targetUser, out var socket) && socket.State == WebSocketState.Open)
             {
                 var msgBuffer = Encoding.UTF8.GetBytes(messageJson);
-                await socket.SendAsync(new ArraySegment<byte>(msgBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
+                try
+                {
+                    await socket.SendAsync(new ArraySegment<byte>(msgBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
+                }
+                catch (WebSocketException)
+                {
+                    RemoveActiveSocket(targetUser, socket);
+                    socket.Abort();
+                }
             }
+        }
+
+        private static async Task ReplaceActiveSocket(string username, WebSocket webSocket)
+        {
+            if (ActiveSockets.TryGetValue(username, out var previousSocket) &&
+                !ReferenceEquals(previousSocket, webSocket) &&
+                previousSocket.State == WebSocketState.Open)
+            {
+                try
+                {
+                    await previousSocket.CloseAsync(
+                        WebSocketCloseStatus.NormalClosure,
+                        "Replaced by a newer connection",
+                        CancellationToken.None);
+                }
+                catch (WebSocketException)
+                {
+                    previousSocket.Abort();
+                }
+            }
+
+            ActiveSockets[username] = webSocket;
+        }
+
+        private static bool RemoveActiveSocket(string username, WebSocket webSocket)
+        {
+            return ((ICollection<KeyValuePair<string, WebSocket>>)ActiveSockets)
+                .Remove(new KeyValuePair<string, WebSocket>(username, webSocket));
         }
 
         private async Task SendGroupEmailNotifications(GroupMessage message)
