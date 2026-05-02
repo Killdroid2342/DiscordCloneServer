@@ -73,6 +73,7 @@ namespace DiscordCloneServer.Controllers
             _context.PrivateMessageFriends.Add(privateMessageFriend);
             await _context.SaveChangesAsync();
             await SendPrivateEmailNotification(privateMessageFriend);
+            await SendPrivateSocketMessage(privateMessageFriend.MessageUserReciver, privateMessageFriend);
             return Ok(BuildPrivateMessageResponse(privateMessageFriend, Array.Empty<MessageReaction>()));
         }
 
@@ -347,11 +348,16 @@ namespace DiscordCloneServer.Controllers
             if (HttpContext.WebSockets.IsWebSocketRequest)
             {
                 var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
-                ActiveSockets[currentUsername] = webSocket;
+                await ReplaceActiveSocket(currentUsername, webSocket);
 
-                await ListenForMessages(currentUsername, webSocket);
-
-                ActiveSockets.TryRemove(currentUsername, out _);
+                try
+                {
+                    await ListenForMessages(currentUsername, webSocket);
+                }
+                finally
+                {
+                    RemoveActiveSocket(currentUsername, webSocket);
+                }
             }
             else
             {
@@ -425,8 +431,44 @@ namespace DiscordCloneServer.Controllers
             {
                 var responseJson = Newtonsoft.Json.JsonConvert.SerializeObject(privateMessage);
                 var messageBuffer = Encoding.UTF8.GetBytes(responseJson);
-                await receiverSocket.SendAsync(new ArraySegment<byte>(messageBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
+                try
+                {
+                    await receiverSocket.SendAsync(new ArraySegment<byte>(messageBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
+                }
+                catch (WebSocketException)
+                {
+                    RemoveActiveSocket(targetUsername, receiverSocket);
+                    receiverSocket.Abort();
+                }
             }
+        }
+
+        private static async Task ReplaceActiveSocket(string username, WebSocket webSocket)
+        {
+            if (ActiveSockets.TryGetValue(username, out var previousSocket) &&
+                !ReferenceEquals(previousSocket, webSocket) &&
+                previousSocket.State == WebSocketState.Open)
+            {
+                try
+                {
+                    await previousSocket.CloseAsync(
+                        WebSocketCloseStatus.NormalClosure,
+                        "Replaced by a newer connection",
+                        CancellationToken.None);
+                }
+                catch (WebSocketException)
+                {
+                    previousSocket.Abort();
+                }
+            }
+
+            ActiveSockets[username] = webSocket;
+        }
+
+        private static bool RemoveActiveSocket(string username, WebSocket webSocket)
+        {
+            return ((ICollection<KeyValuePair<string, WebSocket>>)ActiveSockets)
+                .Remove(new KeyValuePair<string, WebSocket>(username, webSocket));
         }
 
         private async Task SendPrivateEmailNotification(PrivateMessageFriend privateMessage)
