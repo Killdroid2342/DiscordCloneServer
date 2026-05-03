@@ -147,6 +147,18 @@ namespace DiscordCloneServer.Data
                 .Property(server => server.DiscoveryCategory)
                 .HasMaxLength(64);
             modelBuilder.Entity<CreateServer>()
+                .Property(server => server.DiscoveryTagsJson)
+                .HasColumnType("nvarchar(max)");
+            modelBuilder.Entity<CreateServer>()
+                .Property(server => server.WelcomeEnabled)
+                .HasDefaultValue(true);
+            modelBuilder.Entity<CreateServer>()
+                .Property(server => server.WelcomeMessage)
+                .HasMaxLength(600);
+            modelBuilder.Entity<CreateServer>()
+                .Property(server => server.WelcomeChecklistJson)
+                .HasColumnType("nvarchar(max)");
+            modelBuilder.Entity<CreateServer>()
                 .HasIndex(server => new { server.IsPublic, server.DiscoveryCategory });
             modelBuilder.Entity<CreateServer>()
                 .Property(server => server.RequireVerifiedEmail)
@@ -166,6 +178,9 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<ServerMember>()
                 .Property(member => member.IsMuted)
                 .HasDefaultValue(false);
+            modelBuilder.Entity<ServerMember>()
+                .Property(member => member.OnboardingCompletedAt)
+                .HasColumnType("datetime2");
             modelBuilder.Entity<Channel>().ToTable("Channels");
             modelBuilder.Entity<Channel>()
                 .Property(channel => channel.VoiceAccessRestricted)
