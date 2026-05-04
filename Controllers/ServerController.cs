@@ -39,6 +39,11 @@ namespace DiscordCloneServer.Controllers
         private readonly IConfiguration _config;
         private readonly IHubContext<ChatHub> _hubContext;
         private const int MaxModerationDurationMinutes = 60 * 24 * 28;
+        private const int MaxDiscoveryTags = 8;
+        private const int MaxDiscoveryTagLength = 32;
+        private const int MaxWelcomeMessageLength = 600;
+        private const int MaxWelcomeChecklistItems = 6;
+        private const int MaxWelcomeChecklistItemLength = 120;
 
         public ServerController(ApiContext context, IConfiguration config, IHubContext<ChatHub> hubContext)
         {
@@ -47,7 +52,11 @@ namespace DiscordCloneServer.Controllers
             _hubContext = hubContext;
         }
 
-        private static object BuildServerResponse(CreateServer server, string role, bool alreadyMember = false)
+        private static object BuildServerResponse(
+            CreateServer server,
+            string role,
+            bool alreadyMember = false,
+            DateTime? onboardingCompletedAt = null)
         {
             return new
             {
@@ -59,13 +68,18 @@ namespace DiscordCloneServer.Controllers
                 server.Description,
                 server.IsPublic,
                 server.DiscoveryCategory,
+                DiscoveryTags = DeserializeDiscoveryTags(server.DiscoveryTagsJson),
+                server.WelcomeEnabled,
+                server.WelcomeMessage,
+                WelcomeChecklist = DeserializeWelcomeChecklist(server.WelcomeChecklistJson),
                 VerificationLevel = ServerVerificationPolicy.NormalizeLevel(server.VerificationLevel),
                 RequireVerifiedEmail = server.RequireVerifiedEmail,
                 MinimumAccountAgeMinutes = ServerVerificationPolicy.NormalizeRequiredMinutes(server.MinimumAccountAgeMinutes),
                 MinimumMembershipMinutes = ServerVerificationPolicy.NormalizeRequiredMinutes(server.MinimumMembershipMinutes),
                 RequireTwoFactorForModerators = server.RequireTwoFactorForModerators,
                 Role = role,
-                AlreadyMember = alreadyMember
+                AlreadyMember = alreadyMember,
+                OnboardingCompletedAt = onboardingCompletedAt
             };
         }
 
@@ -83,6 +97,7 @@ namespace DiscordCloneServer.Controllers
                 server.Description,
                 server.IsPublic,
                 server.DiscoveryCategory,
+                DiscoveryTags = DeserializeDiscoveryTags(server.DiscoveryTagsJson),
                 server.Date,
                 MemberCount = memberCount,
                 ChannelCount = channelCount,
@@ -324,6 +339,10 @@ namespace DiscordCloneServer.Controllers
             createServer.RequireTwoFactorForModerators = false;
             createServer.IsPublic = false;
             createServer.DiscoveryCategory = null;
+            createServer.DiscoveryTagsJson = SerializeDiscoveryTags(Array.Empty<string>());
+            createServer.WelcomeEnabled = true;
+            createServer.WelcomeMessage = null;
+            createServer.WelcomeChecklistJson = SerializeWelcomeChecklist(DefaultWelcomeChecklist());
             var defaultInviteCode = GenerateInviteCode();
             createServer.InviteLink = BuildInviteLink(Request, defaultInviteCode);
 
@@ -414,6 +433,16 @@ namespace DiscordCloneServer.Controllers
                         ? "owner"
                         : group.Select(member => member.Role).FirstOrDefault() ?? "user"
                 );
+            var onboardingByServerId = memberships
+                .GroupBy(member => member.ServerId)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group
+                        .Select(member => member.OnboardingCompletedAt)
+                        .Where(completedAt => completedAt != null)
+                        .OrderByDescending(completedAt => completedAt)
+                        .FirstOrDefault()
+                );
 
             var serverResponse = servers
                 .Select(server =>
@@ -425,7 +454,8 @@ namespace DiscordCloneServer.Controllers
                             ? "owner"
                             : "user";
 
-                    return BuildServerResponse(server, role);
+                    onboardingByServerId.TryGetValue(serverId, out var onboardingCompletedAt);
+                    return BuildServerResponse(server, role, onboardingCompletedAt: onboardingCompletedAt);
                 })
                 .ToList();
 
@@ -447,7 +477,7 @@ namespace DiscordCloneServer.Controllers
 
 
         [HttpGet]
-        public async Task<IActionResult> DiscoverServers(string? query = null, string? category = null, int take = 24)
+        public async Task<IActionResult> DiscoverServers(string? query = null, string? category = null, string? tag = null, int take = 24)
         {
             var currentUsername = GetCurrentUsername();
             if (string.IsNullOrWhiteSpace(currentUsername))
@@ -458,6 +488,8 @@ namespace DiscordCloneServer.Controllers
             take = Math.Clamp(take, 1, 50);
             var normalizedQuery = query?.Trim();
             var normalizedCategory = NormalizeDiscoveryCategory(category);
+            var normalizedTag = NormalizeDiscoveryTag(tag);
+            var normalizedQueryTag = NormalizeDiscoveryTag(normalizedQuery);
 
             var publicServersQuery = _context.CreateServers
                 .Where(server => server.IsPublic);
@@ -467,12 +499,22 @@ namespace DiscordCloneServer.Controllers
                 publicServersQuery = publicServersQuery.Where(server => server.DiscoveryCategory == normalizedCategory);
             }
 
+            if (!string.IsNullOrWhiteSpace(normalizedTag))
+            {
+                publicServersQuery = publicServersQuery.Where(server =>
+                    server.DiscoveryTagsJson != null &&
+                    server.DiscoveryTagsJson.Contains(normalizedTag));
+            }
+
             if (!string.IsNullOrWhiteSpace(normalizedQuery))
             {
                 publicServersQuery = publicServersQuery.Where(server =>
                     server.ServerName.Contains(normalizedQuery) ||
                     (server.Description != null && server.Description.Contains(normalizedQuery)) ||
-                    (server.DiscoveryCategory != null && server.DiscoveryCategory.Contains(normalizedQuery)));
+                    (server.DiscoveryCategory != null && server.DiscoveryCategory.Contains(normalizedQuery)) ||
+                    (server.DiscoveryTagsJson != null &&
+                        (server.DiscoveryTagsJson.Contains(normalizedQuery) ||
+                         (normalizedQueryTag != null && server.DiscoveryTagsJson.Contains(normalizedQueryTag)))));
             }
 
             var publicServers = await publicServersQuery
@@ -518,9 +560,9 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
-        public Task<IActionResult> PublicServers(string? query = null, string? category = null, int take = 24)
+        public Task<IActionResult> PublicServers(string? query = null, string? category = null, string? tag = null, int take = 24)
         {
-            return DiscoverServers(query, category, take);
+            return DiscoverServers(query, category, tag, take);
         }
 
         [HttpPost]
@@ -539,12 +581,14 @@ namespace DiscordCloneServer.Controllers
 
             var description = NormalizeOptionalDescription(request.Description, 240);
             var category = NormalizeDiscoveryCategory(request.DiscoveryCategory);
+            var discoveryTags = NormalizeDiscoveryTags(request.DiscoveryTags);
             if (request.IsPublic && string.IsNullOrWhiteSpace(description))
                 return BadRequest(new { Message = "Public listings need a short description." });
 
             server.IsPublic = request.IsPublic;
             server.Description = description;
             server.DiscoveryCategory = category;
+            server.DiscoveryTagsJson = SerializeDiscoveryTags(discoveryTags);
 
             AddAuditLog(
                 request.ServerId,
@@ -556,7 +600,53 @@ namespace DiscordCloneServer.Controllers
                 {
                     server.IsPublic,
                     server.Description,
-                    server.DiscoveryCategory
+                    server.DiscoveryCategory,
+                    DiscoveryTags = discoveryTags
+                });
+            await _context.SaveChangesAsync();
+
+            return Ok(BuildServerResponse(
+                server,
+                server.ServerOwner == currentUsername
+                    ? "owner"
+                    : await _context.ServerMembers
+                        .Where(member => member.ServerId == request.ServerId && member.Username == currentUsername)
+                        .Select(member => member.Role)
+                        .FirstOrDefaultAsync() ?? "user"));
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> UpdateWelcomeScreen([FromBody] ServerWelcomeRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageServer(request.ServerId, currentUsername))
+                return Forbid();
+
+            var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == request.ServerId);
+            if (server == null)
+                return NotFound(new { Message = "Server not found." });
+
+            var welcomeMessage = NormalizeOptionalDescription(request.WelcomeMessage, MaxWelcomeMessageLength);
+            var checklist = NormalizeWelcomeChecklist(request.WelcomeChecklist);
+
+            server.WelcomeEnabled = request.WelcomeEnabled;
+            server.WelcomeMessage = welcomeMessage;
+            server.WelcomeChecklistJson = SerializeWelcomeChecklist(checklist);
+
+            AddAuditLog(
+                request.ServerId,
+                "welcome_screen_updated",
+                currentUsername,
+                "server",
+                request.ServerId,
+                details: new
+                {
+                    server.WelcomeEnabled,
+                    server.WelcomeMessage,
+                    WelcomeChecklist = checklist
                 });
             await _context.SaveChangesAsync();
 
@@ -709,6 +799,11 @@ namespace DiscordCloneServer.Controllers
                 .OrderBy(c => c.Position)
                 .ThenBy(c => c.Name)
                 .ToListAsync();
+            var membership = await _context.ServerMembers
+                .Where(member => member.ServerId == serverId && member.Username == currentUsername)
+                .OrderByDescending(member => member.Role == "owner")
+                .ThenBy(member => member.Id)
+                .FirstOrDefaultAsync();
 
             return Ok(new
             {
@@ -716,12 +811,37 @@ namespace DiscordCloneServer.Controllers
                     server,
                     server.ServerOwner == currentUsername
                         ? "owner"
-                        : await _context.ServerMembers
-                            .Where(member => member.ServerId == serverId && member.Username == currentUsername)
-                            .Select(member => member.Role)
-                            .FirstOrDefaultAsync() ?? "user"),
+                        : membership?.Role ?? "user",
+                    onboardingCompletedAt: membership?.OnboardingCompletedAt),
                 Categories = categories,
                 Channels = channels
+            });
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> CompleteOnboarding([FromBody] ServerActionRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            var membership = await _context.ServerMembers
+                .Where(member => member.ServerId == request.ServerId && member.Username == currentUsername)
+                .OrderByDescending(member => member.Role == "owner")
+                .ThenBy(member => member.Id)
+                .FirstOrDefaultAsync();
+
+            if (membership == null)
+                return Forbid();
+
+            membership.OnboardingCompletedAt ??= DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                membership.ServerId,
+                membership.Username,
+                membership.OnboardingCompletedAt
             });
         }
 
@@ -1952,7 +2072,11 @@ namespace DiscordCloneServer.Controllers
                     await _context.SaveChangesAsync();
                 }
 
-                return Ok(BuildServerResponse(server, role, alreadyMember: true));
+                return Ok(BuildServerResponse(
+                    server,
+                    role,
+                    alreadyMember: true,
+                    onboardingCompletedAt: preservedMembership.OnboardingCompletedAt));
             }
 
             if (server.ServerOwner != normalizedUsername)
@@ -1988,7 +2112,7 @@ namespace DiscordCloneServer.Controllers
 
             await _hubContext.Clients.Group(serverId).SendAsync("NewMember", normalizedUsername);
 
-            return Ok(BuildServerResponse(server, role));
+            return Ok(BuildServerResponse(server, role, onboardingCompletedAt: membership.OnboardingCompletedAt));
         }
 
         private async Task<bool> CanManageServer(string serverId, string username)
@@ -2196,6 +2320,102 @@ namespace DiscordCloneServer.Controllers
                 : null;
         }
 
+        private static string? NormalizeDiscoveryTag(string? value)
+        {
+            var tag = value?.Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(tag))
+            {
+                return null;
+            }
+
+            tag = tag.Replace(' ', '-');
+            return tag.Length <= MaxDiscoveryTagLength &&
+                   tag.All(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.')
+                ? tag
+                : null;
+        }
+
+        private static string[] NormalizeDiscoveryTags(IEnumerable<string>? values)
+        {
+            return (values ?? Array.Empty<string>())
+                .SelectMany(value => (value ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .Select(NormalizeDiscoveryTag)
+                .Where(tag => !string.IsNullOrWhiteSpace(tag))
+                .Cast<string>()
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(tag => tag)
+                .Take(MaxDiscoveryTags)
+                .ToArray();
+        }
+
+        private static string SerializeDiscoveryTags(IEnumerable<string>? tags)
+        {
+            return JsonSerializer.Serialize(NormalizeDiscoveryTags(tags));
+        }
+
+        private static string[] DeserializeDiscoveryTags(string? tagsJson)
+        {
+            if (string.IsNullOrWhiteSpace(tagsJson))
+            {
+                return Array.Empty<string>();
+            }
+
+            try
+            {
+                return NormalizeDiscoveryTags(JsonSerializer.Deserialize<string[]>(tagsJson));
+            }
+            catch (JsonException)
+            {
+                return Array.Empty<string>();
+            }
+        }
+
+        private static string[] DefaultWelcomeChecklist()
+        {
+            return new[]
+            {
+                "Read the welcome message",
+                "Say hello in the general channel",
+                "Join a voice channel when you are ready"
+            };
+        }
+
+        private static string[] NormalizeWelcomeChecklist(IEnumerable<string>? values)
+        {
+            return (values ?? Array.Empty<string>())
+                .SelectMany(value => (value ?? string.Empty).Split(new[] { ',', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .Select(value => value.Trim())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.Length <= MaxWelcomeChecklistItemLength ? value : value[..MaxWelcomeChecklistItemLength])
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(MaxWelcomeChecklistItems)
+                .ToArray();
+        }
+
+        private static string SerializeWelcomeChecklist(IEnumerable<string>? items)
+        {
+            var checklist = NormalizeWelcomeChecklist(items);
+            return JsonSerializer.Serialize(checklist.Length > 0 ? checklist : DefaultWelcomeChecklist());
+        }
+
+        private static string[] DeserializeWelcomeChecklist(string? checklistJson)
+        {
+            if (string.IsNullOrWhiteSpace(checklistJson))
+            {
+                return DefaultWelcomeChecklist();
+            }
+
+            try
+            {
+                var checklist = NormalizeWelcomeChecklist(JsonSerializer.Deserialize<string[]>(checklistJson));
+                return checklist.Length > 0 ? checklist : DefaultWelcomeChecklist();
+            }
+            catch (JsonException)
+            {
+                return DefaultWelcomeChecklist();
+            }
+        }
+
         private static string? NormalizeOptionalDescription(string? value, int maxLength)
         {
             var description = value?.Trim();
@@ -2349,6 +2569,15 @@ namespace DiscordCloneServer.Controllers
         public bool IsPublic { get; set; }
         public string? Description { get; set; }
         public string? DiscoveryCategory { get; set; }
+        public string[]? DiscoveryTags { get; set; }
+    }
+
+    public class ServerWelcomeRequest
+    {
+        public string ServerId { get; set; } = string.Empty;
+        public bool WelcomeEnabled { get; set; } = true;
+        public string? WelcomeMessage { get; set; }
+        public string[]? WelcomeChecklist { get; set; }
     }
 
     public class ServerVerificationLevelRequest
