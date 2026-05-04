@@ -37,6 +37,9 @@ namespace DiscordCloneServer.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
 
+                    b.Property<string>("DiscoveryTagsJson")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("InviteLink")
                         .HasColumnType("nvarchar(max)");
 
@@ -77,6 +80,18 @@ namespace DiscordCloneServer.Migrations
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("WelcomeChecklistJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("WelcomeEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(true);
+
+                    b.Property<string>("WelcomeMessage")
+                        .HasMaxLength(600)
+                        .HasColumnType("nvarchar(600)");
 
                     b.HasKey("ServerID");
 
@@ -640,6 +655,9 @@ namespace DiscordCloneServer.Migrations
                         .HasColumnType("datetime2");
 
                     b.Property<DateTime?>("MutedUntil")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("OnboardingCompletedAt")
                         .HasColumnType("datetime2");
 
                     b.Property<string>("Role")
