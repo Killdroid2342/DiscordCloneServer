@@ -11,6 +11,7 @@ namespace DiscordCloneServer.Models
         public string Username { get; set; } = string.Empty;
         public string Role { get; set; } = "user";
         public DateTime JoinedAt { get; set; } = DateTime.UtcNow;
+        public DateTime? OnboardingCompletedAt { get; set; }
         public bool IsMuted { get; set; }
         public DateTime? MutedUntil { get; set; }
         public DateTime? TimedOutUntil { get; set; }
