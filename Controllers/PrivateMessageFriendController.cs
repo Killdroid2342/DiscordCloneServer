@@ -45,19 +45,25 @@ namespace DiscordCloneServer.Controllers
             privateMessageFriend.AttachmentUrl = NormalizeOptional(privateMessageFriend.AttachmentUrl);
             privateMessageFriend.AttachmentContentType = NormalizeOptional(privateMessageFriend.AttachmentContentType);
             privateMessageFriend.ReplyToMessageId = NormalizeOptional(privateMessageFriend.ReplyToMessageId);
+            if (!MessagePollService.TryNormalizeDraft(privateMessageFriend.Poll, out var pollDraft, out var pollError))
+                return BadRequest(new { message = pollError });
 
             if (!await CanSendDm(username, privateMessageFriend.MessageUserReciver))
                 return Forbid();
-            if (!IsValidPrivateMessage(privateMessageFriend.FriendMessagesData, privateMessageFriend.AttachmentUrl))
-                return BadRequest(new { message = "Message must be 1-4000 characters or include an attachment." });
+            if (!IsValidPrivateMessage(privateMessageFriend.FriendMessagesData, privateMessageFriend.AttachmentUrl, pollDraft != null))
+                return BadRequest(new { message = "Message must be 1-4000 characters, include an attachment, or include a poll." });
             if (!IsValidAttachment(privateMessageFriend.AttachmentUrl))
                 return BadRequest(new { message = "Attachment must be blank, an http URL, or an uploaded file URL." });
-            if (!string.IsNullOrWhiteSpace(privateMessageFriend.ReplyToMessageId) &&
-                !await _context.PrivateMessageFriends.AnyAsync(message =>
+            PrivateMessageFriend? replyTarget = null;
+            if (!string.IsNullOrWhiteSpace(privateMessageFriend.ReplyToMessageId))
+            {
+                replyTarget = await _context.PrivateMessageFriends.FirstOrDefaultAsync(message =>
                     message.PrivateMessageID == privateMessageFriend.ReplyToMessageId &&
                     ((message.MessagesUserSender == username && message.MessageUserReciver == privateMessageFriend.MessageUserReciver) ||
-                     (message.MessagesUserSender == privateMessageFriend.MessageUserReciver && message.MessageUserReciver == username))))
-                return BadRequest(new { message = "Reply target was not found in this conversation." });
+                     (message.MessagesUserSender == privateMessageFriend.MessageUserReciver && message.MessageUserReciver == username)));
+                if (replyTarget == null)
+                    return BadRequest(new { message = "Reply target was not found in this conversation." });
+            }
 
             privateMessageFriend.PrivateMessageID = string.IsNullOrWhiteSpace(privateMessageFriend.PrivateMessageID)
                 ? Guid.NewGuid().ToString()
@@ -71,10 +77,26 @@ namespace DiscordCloneServer.Controllers
             }
 
             _context.PrivateMessageFriends.Add(privateMessageFriend);
+            if (pollDraft != null)
+            {
+                MessagePollService.AddPoll(_context, "dm", privateMessageFriend.PrivateMessageID, username, pollDraft);
+            }
+
             await _context.SaveChangesAsync();
             await SendPrivateEmailNotification(privateMessageFriend);
-            await SendPrivateSocketMessage(privateMessageFriend.MessageUserReciver, privateMessageFriend);
-            return Ok(BuildPrivateMessageResponse(privateMessageFriend, Array.Empty<MessageReaction>()));
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "dm",
+                new[] { privateMessageFriend.PrivateMessageID },
+                username,
+                HttpContext.RequestAborted);
+            var response = BuildPrivateMessageResponse(
+                privateMessageFriend,
+                Array.Empty<MessageReaction>(),
+                replyTarget,
+                pollLookup.GetValueOrDefault(privateMessageFriend.PrivateMessageID));
+            await SendPrivateSocketMessage(privateMessageFriend.MessageUserReciver, response);
+            return Ok(response);
         }
 
         [HttpGet]
@@ -117,10 +139,19 @@ namespace DiscordCloneServer.Controllers
             var reactions = await _context.MessageReactions
                 .Where(reaction => reaction.ScopeType == "dm" && messageIds.Contains(reaction.MessageId))
                 .ToListAsync();
+            var replyPreviews = GetPrivateReplyPreviewLookup(page, messages);
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "dm",
+                messageIds,
+                username,
+                HttpContext.RequestAborted);
 
             return Ok(page.Select(message => BuildPrivateMessageResponse(
                 message,
-                reactions.Where(reaction => reaction.MessageId == message.PrivateMessageID))));
+                reactions.Where(reaction => reaction.MessageId == message.PrivateMessageID),
+                GetPrivateReplyPreview(message, replyPreviews),
+                pollLookup.GetValueOrDefault(message.PrivateMessageID))));
         }
 
         [HttpPost]
@@ -138,8 +169,14 @@ namespace DiscordCloneServer.Controllers
 
             var nextText = request.FriendMessagesData?.Trim() ?? string.Empty;
             var nextAttachmentUrl = NormalizeOptional(request.AttachmentUrl);
-            if (!IsValidPrivateMessage(nextText, nextAttachmentUrl))
-                return BadRequest(new { message = "Message must be 1-4000 characters or include an attachment." });
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "dm",
+                new[] { message.PrivateMessageID },
+                username,
+                HttpContext.RequestAborted);
+            if (!IsValidPrivateMessage(nextText, nextAttachmentUrl, pollLookup.ContainsKey(message.PrivateMessageID)))
+                return BadRequest(new { message = "Message must be 1-4000 characters, include an attachment, or include a poll." });
             if (!IsValidAttachment(nextAttachmentUrl))
                 return BadRequest(new { message = "Attachment must be blank, an http URL, or an uploaded file URL." });
 
@@ -149,7 +186,11 @@ namespace DiscordCloneServer.Controllers
             message.EditedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
 
-            return Ok(BuildPrivateMessageResponse(message, await GetReactionsForMessage("dm", message.PrivateMessageID)));
+            return Ok(BuildPrivateMessageResponse(
+                message,
+                await GetReactionsForMessage("dm", message.PrivateMessageID),
+                null,
+                pollLookup.GetValueOrDefault(message.PrivateMessageID)));
         }
 
         [HttpPost]
@@ -165,6 +206,11 @@ namespace DiscordCloneServer.Controllers
             if (message.MessagesUserSender != username)
                 return Forbid();
 
+            await MessagePollService.RemovePollsForMessagesAsync(
+                _context,
+                "dm",
+                new[] { message.PrivateMessageID },
+                HttpContext.RequestAborted);
             _context.PrivateMessageFriends.Remove(message);
             await _context.SaveChangesAsync();
             return Ok(new { message = "Message deleted." });
@@ -210,10 +256,19 @@ namespace DiscordCloneServer.Controllers
             var reactions = await _context.MessageReactions
                 .Where(reaction => reaction.ScopeType == "dm" && messageIds.Contains(reaction.MessageId))
                 .ToListAsync();
+            var replyPreviews = GetPrivateReplyPreviewLookup(filtered, messages);
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "dm",
+                messageIds,
+                username,
+                HttpContext.RequestAborted);
 
             return Ok(filtered.Select(message => BuildPrivateMessageResponse(
                 message,
-                reactions.Where(reaction => reaction.MessageId == message.PrivateMessageID))));
+                reactions.Where(reaction => reaction.MessageId == message.PrivateMessageID),
+                GetPrivateReplyPreview(message, replyPreviews),
+                pollLookup.GetValueOrDefault(message.PrivateMessageID))));
         }
 
         [HttpPost]
@@ -388,6 +443,10 @@ namespace DiscordCloneServer.Controllers
                     privateMessage.AttachmentUrl = NormalizeOptional(privateMessage.AttachmentUrl);
                     privateMessage.AttachmentContentType = NormalizeOptional(privateMessage.AttachmentContentType);
                     privateMessage.ReplyToMessageId = NormalizeOptional(privateMessage.ReplyToMessageId);
+                    if (!MessagePollService.TryNormalizeDraft(privateMessage.Poll, out var pollDraft, out _))
+                    {
+                        continue;
+                    }
                     privateMessage.Date = DateTime.UtcNow.ToString("O");
                     privateMessage.PrivateMessageID = string.IsNullOrWhiteSpace(privateMessage.PrivateMessageID)
                         ? Guid.NewGuid().ToString()
@@ -399,23 +458,55 @@ namespace DiscordCloneServer.Controllers
                         pm.MessageUserReciver == privateMessage.MessageUserReciver);
                     if (existingMessage != null)
                     {
-                        await SendPrivateSocketMessage(privateMessage.MessageUserReciver, existingMessage);
+                        var existingPollLookup = await MessagePollService.GetPollLookupAsync(
+                            _context,
+                            "dm",
+                            new[] { existingMessage.PrivateMessageID },
+                            username);
+                        await SendPrivateSocketMessage(
+                            privateMessage.MessageUserReciver,
+                            BuildPrivateMessageResponse(
+                                existingMessage,
+                                await GetReactionsForMessage("dm", existingMessage.PrivateMessageID),
+                                null,
+                                existingPollLookup.GetValueOrDefault(existingMessage.PrivateMessageID)));
                         continue;
                     }
 
-                    if (!IsValidPrivateMessage(privateMessage.FriendMessagesData, privateMessage.AttachmentUrl) ||
+                    if (!IsValidPrivateMessage(privateMessage.FriendMessagesData, privateMessage.AttachmentUrl, pollDraft != null) ||
                         !IsValidAttachment(privateMessage.AttachmentUrl) ||
                         !await CanSendDm(username, privateMessage.MessageUserReciver) ||
+                        (!string.IsNullOrWhiteSpace(privateMessage.ReplyToMessageId) &&
+                         !await _context.PrivateMessageFriends.AnyAsync(message =>
+                             message.PrivateMessageID == privateMessage.ReplyToMessageId &&
+                             ((message.MessagesUserSender == username && message.MessageUserReciver == privateMessage.MessageUserReciver) ||
+                              (message.MessagesUserSender == privateMessage.MessageUserReciver && message.MessageUserReciver == username)))) ||
                         await _context.PrivateMessageFriends.AnyAsync(pm => pm.PrivateMessageID == privateMessage.PrivateMessageID))
                     {
                         continue;
                     }
 
                     _context.PrivateMessageFriends.Add(privateMessage);
+                    if (pollDraft != null)
+                    {
+                        MessagePollService.AddPoll(_context, "dm", privateMessage.PrivateMessageID, username, pollDraft);
+                    }
+
                     await _context.SaveChangesAsync();
                     await SendPrivateEmailNotification(privateMessage);
 
-                    await SendPrivateSocketMessage(privateMessage.MessageUserReciver, privateMessage);
+                    var pollLookup = await MessagePollService.GetPollLookupAsync(
+                        _context,
+                        "dm",
+                        new[] { privateMessage.PrivateMessageID },
+                        username);
+                    await SendPrivateSocketMessage(
+                        privateMessage.MessageUserReciver,
+                        BuildPrivateMessageResponse(
+                            privateMessage,
+                            Array.Empty<MessageReaction>(),
+                            null,
+                            pollLookup.GetValueOrDefault(privateMessage.PrivateMessageID)));
                 }
                 else if (result.MessageType == WebSocketMessageType.Close)
                 {
@@ -424,7 +515,7 @@ namespace DiscordCloneServer.Controllers
             }
         }
 
-        private static async Task SendPrivateSocketMessage(string targetUsername, PrivateMessageFriend privateMessage)
+        private static async Task SendPrivateSocketMessage(string targetUsername, object privateMessage)
         {
             if (ActiveSockets.TryGetValue(targetUsername, out var receiverSocket) &&
                 receiverSocket.State == WebSocketState.Open)
@@ -539,10 +630,11 @@ namespace DiscordCloneServer.Controllers
             };
         }
 
-        private static bool IsValidPrivateMessage(string? message, string? attachmentUrl)
+        private static bool IsValidPrivateMessage(string? message, string? attachmentUrl, bool hasPoll = false)
         {
             return (!string.IsNullOrWhiteSpace(message) && message.Length <= 4000) ||
-                   !string.IsNullOrWhiteSpace(attachmentUrl);
+                   !string.IsNullOrWhiteSpace(attachmentUrl) ||
+                   hasPoll;
         }
 
         private static bool ContainsValue(string[]? values, string value)
@@ -585,7 +677,60 @@ namespace DiscordCloneServer.Controllers
             return state;
         }
 
-        private static object BuildPrivateMessageResponse(PrivateMessageFriend message, IEnumerable<MessageReaction> reactions)
+        private static Dictionary<string, PrivateMessageFriend> GetPrivateReplyPreviewLookup(
+            IEnumerable<PrivateMessageFriend> page,
+            IEnumerable<PrivateMessageFriend> conversationMessages)
+        {
+            var replyIds = page
+                .Select(message => message.ReplyToMessageId)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (replyIds.Count == 0)
+            {
+                return new Dictionary<string, PrivateMessageFriend>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            return conversationMessages
+                .Where(message => replyIds.Contains(message.PrivateMessageID))
+                .GroupBy(message => message.PrivateMessageID, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static PrivateMessageFriend? GetPrivateReplyPreview(
+            PrivateMessageFriend message,
+            IReadOnlyDictionary<string, PrivateMessageFriend> replyPreviews)
+        {
+            return !string.IsNullOrWhiteSpace(message.ReplyToMessageId) &&
+                   replyPreviews.TryGetValue(message.ReplyToMessageId, out var preview)
+                ? preview
+                : null;
+        }
+
+        private static object? BuildPrivateReplyPreview(PrivateMessageFriend? message)
+        {
+            if (message == null)
+            {
+                return null;
+            }
+
+            return new
+            {
+                MessageId = message.PrivateMessageID,
+                Sender = message.MessagesUserSender,
+                Date = message.Date,
+                Text = message.FriendMessagesData,
+                message.AttachmentUrl,
+                message.AttachmentContentType
+            };
+        }
+
+        private static object BuildPrivateMessageResponse(
+            PrivateMessageFriend message,
+            IEnumerable<MessageReaction> reactions,
+            PrivateMessageFriend? replyPreview = null,
+            MessagePollResponse? poll = null)
         {
             return new
             {
@@ -598,8 +743,10 @@ namespace DiscordCloneServer.Controllers
                 message.AttachmentUrl,
                 message.AttachmentContentType,
                 message.EditedAt,
+                ReplyPreview = BuildPrivateReplyPreview(replyPreview),
                 Mentions = ExtractMentions(message.FriendMessagesData),
-                Reactions = SummarizeReactions(reactions)
+                Reactions = SummarizeReactions(reactions),
+                Poll = poll
             };
         }
 
