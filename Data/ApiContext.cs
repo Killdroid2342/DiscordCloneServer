@@ -9,6 +9,8 @@ namespace DiscordCloneServer.Data
         public DbSet<Account> Accounts { get; set; }
         public DbSet<CreateServer> CreateServers { get; set; }
         public DbSet<ServerMessage> ServerMessages { get; set; }
+        public DbSet<ServerThread> ServerThreads { get; set; }
+        public DbSet<ServerThreadMessage> ServerThreadMessages { get; set; }
         public DbSet<PrivateMessageFriend> PrivateMessageFriends { get; set; }
         public DbSet<ServerMember> ServerMembers { get; set; }
         public DbSet<Channel> Channels { get; set; }
@@ -173,6 +175,42 @@ namespace DiscordCloneServer.Data
                 .Property(server => server.RequireTwoFactorForModerators)
                 .HasDefaultValue(false);
             modelBuilder.Entity<ServerMessage>().ToTable("Server_Message");
+            modelBuilder.Entity<ServerMessage>()
+                .Property(message => message.IsPinned)
+                .HasDefaultValue(false);
+            modelBuilder.Entity<ServerMessage>()
+                .Property(message => message.PinnedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerThread>().ToTable("Server_Threads");
+            modelBuilder.Entity<ServerThread>()
+                .Property(thread => thread.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerThread>()
+                .Property(thread => thread.ChannelId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerThread>()
+                .Property(thread => thread.ParentMessageId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerThread>()
+                .Property(thread => thread.Name)
+                .HasMaxLength(120);
+            modelBuilder.Entity<ServerThread>()
+                .Property(thread => thread.CreatedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerThread>()
+                .HasIndex(thread => thread.ParentMessageId)
+                .IsUnique();
+            modelBuilder.Entity<ServerThread>()
+                .HasIndex(thread => new { thread.ChannelId, thread.LastActivityAt });
+            modelBuilder.Entity<ServerThreadMessage>().ToTable("Server_Thread_Messages");
+            modelBuilder.Entity<ServerThreadMessage>()
+                .Property(message => message.ThreadId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerThreadMessage>()
+                .Property(message => message.MessagesUserSender)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerThreadMessage>()
+                .HasIndex(message => message.ThreadId);
             modelBuilder.Entity<PrivateMessageFriend>().ToTable("Private_Message_Friend");
             modelBuilder.Entity<ServerMember>().ToTable("Server_Members");
             modelBuilder.Entity<ServerMember>()
