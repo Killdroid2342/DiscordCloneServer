@@ -14,5 +14,8 @@ namespace DiscordCloneServer.Models
         public string? AttachmentUrl { get; set; }
         public string? AttachmentContentType { get; set; }
         public DateTime? EditedAt { get; set; }
+        public bool IsPinned { get; set; }
+        public string? PinnedBy { get; set; }
+        public DateTime? PinnedAt { get; set; }
     }
 }
