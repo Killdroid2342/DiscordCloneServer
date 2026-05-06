@@ -149,7 +149,24 @@ namespace DiscordCloneServer.Controllers
                 }
             }
 
-            return Ok(orderedMessages.TakeLast(take).ToList());
+            var page = orderedMessages.TakeLast(take).ToList();
+            var messageIds = page.Select(message => message.Id.ToString()).ToList();
+            var reactions = await _context.MessageReactions
+                .Where(reaction => reaction.ScopeType == "group" && messageIds.Contains(reaction.MessageId))
+                .ToListAsync();
+            var replyPreviews = GetGroupReplyPreviewLookup(page, messages);
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "group",
+                messageIds,
+                currentUsername,
+                HttpContext.RequestAborted);
+
+            return Ok(page.Select(message => BuildGroupMessageResponse(
+                message,
+                reactions.Where(reaction => reaction.MessageId == message.Id.ToString()),
+                GetGroupReplyPreview(message, replyPreviews),
+                pollLookup.GetValueOrDefault(message.Id.ToString()))));
         }
 
         [HttpPost]
@@ -265,6 +282,11 @@ namespace DiscordCloneServer.Controllers
             if (group.Members.Length == 0)
             {
                 var messages = await _context.GroupMessages.Where(message => message.GroupId == group.Id).ToListAsync();
+                await MessagePollService.RemovePollsForMessagesAsync(
+                    _context,
+                    "group",
+                    messages.Select(message => message.Id.ToString()),
+                    HttpContext.RequestAborted);
                 _context.GroupMessages.RemoveRange(messages);
                 _context.GroupChats.Remove(group);
             }
@@ -289,13 +311,20 @@ namespace DiscordCloneServer.Controllers
 
             var content = request.Content?.Trim() ?? string.Empty;
             var attachmentUrl = NormalizeOptional(request.AttachmentUrl);
-            if (!IsValidGroupMessage(content, attachmentUrl))
-                return BadRequest(new { message = "Message must be 1-4000 characters or include an attachment." });
+            if (!MessagePollService.TryNormalizeDraft(request.Poll, out var pollDraft, out var pollError))
+                return BadRequest(new { message = pollError });
+            if (!IsValidGroupMessage(content, attachmentUrl, pollDraft != null))
+                return BadRequest(new { message = "Message must be 1-4000 characters, include an attachment, or include a poll." });
             if (!IsValidAttachment(attachmentUrl))
                 return BadRequest(new { message = "Attachment must be blank, an http URL, or an uploaded file URL." });
-            if (request.ReplyToMessageId != null &&
-                !await _context.GroupMessages.AnyAsync(message => message.GroupId == request.GroupId && message.Id == request.ReplyToMessageId.Value))
-                return BadRequest(new { message = "Reply target was not found in this group." });
+            GroupMessage? replyTarget = null;
+            if (request.ReplyToMessageId != null)
+            {
+                replyTarget = await _context.GroupMessages.FirstOrDefaultAsync(message =>
+                    message.GroupId == request.GroupId && message.Id == request.ReplyToMessageId.Value);
+                if (replyTarget == null)
+                    return BadRequest(new { message = "Reply target was not found in this group." });
+            }
 
             var message = new GroupMessage
             {
@@ -309,10 +338,26 @@ namespace DiscordCloneServer.Controllers
                 AttachmentContentType = NormalizeOptional(request.AttachmentContentType)
             };
             _context.GroupMessages.Add(message);
+            if (pollDraft != null)
+            {
+                MessagePollService.AddPoll(_context, "group", message.Id.ToString(), currentUsername, pollDraft);
+            }
+
             await _context.SaveChangesAsync();
-            await BroadcastToGroup(message.GroupId, JsonSerializer.Serialize(message));
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "group",
+                new[] { message.Id.ToString() },
+                currentUsername,
+                HttpContext.RequestAborted);
+            var response = BuildGroupMessageResponse(
+                message,
+                Array.Empty<MessageReaction>(),
+                replyTarget,
+                pollLookup.GetValueOrDefault(message.Id.ToString()));
+            await BroadcastToGroup(message.GroupId, JsonSerializer.Serialize(response));
             await SendGroupEmailNotifications(message);
-            return Ok(BuildGroupMessageResponse(message, Array.Empty<MessageReaction>()));
+            return Ok(response);
         }
 
         [HttpPost]
@@ -330,8 +375,14 @@ namespace DiscordCloneServer.Controllers
 
             var content = request.Content?.Trim() ?? string.Empty;
             var attachmentUrl = NormalizeOptional(request.AttachmentUrl);
-            if (!IsValidGroupMessage(content, attachmentUrl))
-                return BadRequest(new { message = "Message must be 1-4000 characters or include an attachment." });
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "group",
+                new[] { message.Id.ToString() },
+                currentUsername,
+                HttpContext.RequestAborted);
+            if (!IsValidGroupMessage(content, attachmentUrl, pollLookup.ContainsKey(message.Id.ToString())))
+                return BadRequest(new { message = "Message must be 1-4000 characters, include an attachment, or include a poll." });
             if (!IsValidAttachment(attachmentUrl))
                 return BadRequest(new { message = "Attachment must be blank, an http URL, or an uploaded file URL." });
 
@@ -340,7 +391,11 @@ namespace DiscordCloneServer.Controllers
             message.AttachmentContentType = NormalizeOptional(request.AttachmentContentType);
             message.EditedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
-            return Ok(BuildGroupMessageResponse(message, await GetReactionsForMessage("group", message.Id.ToString())));
+            return Ok(BuildGroupMessageResponse(
+                message,
+                await GetReactionsForMessage("group", message.Id.ToString()),
+                null,
+                pollLookup.GetValueOrDefault(message.Id.ToString())));
         }
 
         [HttpPost]
@@ -358,6 +413,11 @@ namespace DiscordCloneServer.Controllers
             if (message.Sender != currentUsername && group?.Owner != currentUsername)
                 return Forbid();
 
+            await MessagePollService.RemovePollsForMessagesAsync(
+                _context,
+                "group",
+                new[] { message.Id.ToString() },
+                HttpContext.RequestAborted);
             _context.GroupMessages.Remove(message);
             await _context.SaveChangesAsync();
             return Ok(new { message = "Message deleted." });
@@ -389,10 +449,19 @@ namespace DiscordCloneServer.Controllers
             var reactions = await _context.MessageReactions
                 .Where(reaction => reaction.ScopeType == "group" && messageIds.Contains(reaction.MessageId))
                 .ToListAsync();
+            var replyPreviews = GetGroupReplyPreviewLookup(filtered, messages);
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "group",
+                messageIds,
+                currentUsername,
+                HttpContext.RequestAborted);
 
             return Ok(filtered.Select(message => BuildGroupMessageResponse(
                 message,
-                reactions.Where(reaction => reaction.MessageId == message.Id.ToString()))));
+                reactions.Where(reaction => reaction.MessageId == message.Id.ToString()),
+                GetGroupReplyPreview(message, replyPreviews),
+                pollLookup.GetValueOrDefault(message.Id.ToString()))));
         }
 
         [HttpPost]
@@ -543,6 +612,11 @@ namespace DiscordCloneServer.Controllers
             if (group.Members.Length == 0)
             {
                 var messages = await _context.GroupMessages.Where(message => message.GroupId == group.Id).ToListAsync();
+                await MessagePollService.RemovePollsForMessagesAsync(
+                    _context,
+                    "group",
+                    messages.Select(message => message.Id.ToString()),
+                    HttpContext.RequestAborted);
                 _context.GroupMessages.RemoveRange(messages);
                 _context.GroupChats.Remove(group);
             }
@@ -601,9 +675,16 @@ namespace DiscordCloneServer.Controllers
                     if (type == "chat")
                     {
                         var groupMessage = JsonSerializer.Deserialize<GroupMessage>(messageJson);
+                        NormalizedMessagePollDraft? pollDraft = null;
+                        var hasValidPoll = groupMessage != null &&
+                                           MessagePollService.TryNormalizeDraft(groupMessage.Poll, out pollDraft, out _);
                         if (groupMessage == null ||
+                            !hasValidPoll ||
                             !await IsGroupMember(groupMessage.GroupId, username) ||
-                            !IsValidGroupMessage(groupMessage.Content))
+                            !IsValidGroupMessage(groupMessage.Content, groupMessage.AttachmentUrl, pollDraft != null) ||
+                            (groupMessage.ReplyToMessageId != null &&
+                             !await _context.GroupMessages.AnyAsync(message =>
+                                 message.GroupId == groupMessage.GroupId && message.Id == groupMessage.ReplyToMessageId.Value)))
                         {
                             continue;
                         }
@@ -615,9 +696,25 @@ namespace DiscordCloneServer.Controllers
                         groupMessage.AttachmentUrl = NormalizeOptional(groupMessage.AttachmentUrl);
                         groupMessage.AttachmentContentType = NormalizeOptional(groupMessage.AttachmentContentType);
                         _context.GroupMessages.Add(groupMessage);
+                        if (pollDraft != null)
+                        {
+                            MessagePollService.AddPoll(_context, "group", groupMessage.Id.ToString(), username, pollDraft);
+                        }
+
                         await _context.SaveChangesAsync();
 
-                        await BroadcastToGroup(groupMessage.GroupId, JsonSerializer.Serialize(groupMessage));
+                        var pollLookup = await MessagePollService.GetPollLookupAsync(
+                            _context,
+                            "group",
+                            new[] { groupMessage.Id.ToString() },
+                            username);
+                        await BroadcastToGroup(
+                            groupMessage.GroupId,
+                            JsonSerializer.Serialize(BuildGroupMessageResponse(
+                                groupMessage,
+                                Array.Empty<MessageReaction>(),
+                                null,
+                                pollLookup.GetValueOrDefault(groupMessage.Id.ToString()))));
                         await SendGroupEmailNotifications(groupMessage);
                         continue;
                     }
@@ -766,10 +863,11 @@ namespace DiscordCloneServer.Controllers
             return group?.Members.Any(member => string.Equals(member, username, StringComparison.OrdinalIgnoreCase)) == true;
         }
 
-        private static bool IsValidGroupMessage(string? message, string? attachmentUrl = null)
+        private static bool IsValidGroupMessage(string? message, string? attachmentUrl = null, bool hasPoll = false)
         {
             return (!string.IsNullOrWhiteSpace(message) && message.Length <= 4000) ||
-                   !string.IsNullOrWhiteSpace(attachmentUrl);
+                   !string.IsNullOrWhiteSpace(attachmentUrl) ||
+                   hasPoll;
         }
 
         private static Guid? TryGetGuid(JsonElement root, string propertyName)
@@ -864,7 +962,61 @@ namespace DiscordCloneServer.Controllers
             return state;
         }
 
-        private static object BuildGroupMessageResponse(GroupMessage message, IEnumerable<MessageReaction> reactions)
+        private static Dictionary<Guid, GroupMessage> GetGroupReplyPreviewLookup(
+            IEnumerable<GroupMessage> page,
+            IEnumerable<GroupMessage> conversationMessages)
+        {
+            var replyIds = page
+                .Select(message => message.ReplyToMessageId)
+                .Where(id => id.HasValue)
+                .Select(id => id!.Value)
+                .Distinct()
+                .ToHashSet();
+
+            if (replyIds.Count == 0)
+            {
+                return new Dictionary<Guid, GroupMessage>();
+            }
+
+            return conversationMessages
+                .Where(message => replyIds.Contains(message.Id))
+                .GroupBy(message => message.Id)
+                .ToDictionary(group => group.Key, group => group.First());
+        }
+
+        private static GroupMessage? GetGroupReplyPreview(
+            GroupMessage message,
+            IReadOnlyDictionary<Guid, GroupMessage> replyPreviews)
+        {
+            return message.ReplyToMessageId.HasValue &&
+                   replyPreviews.TryGetValue(message.ReplyToMessageId.Value, out var preview)
+                ? preview
+                : null;
+        }
+
+        private static object? BuildGroupReplyPreview(GroupMessage? message)
+        {
+            if (message == null)
+            {
+                return null;
+            }
+
+            return new
+            {
+                MessageId = message.Id,
+                Sender = message.Sender,
+                Date = message.Date,
+                Text = message.Content,
+                message.AttachmentUrl,
+                message.AttachmentContentType
+            };
+        }
+
+        private static object BuildGroupMessageResponse(
+            GroupMessage message,
+            IEnumerable<MessageReaction> reactions,
+            GroupMessage? replyPreview = null,
+            MessagePollResponse? poll = null)
         {
             return new
             {
@@ -877,8 +1029,10 @@ namespace DiscordCloneServer.Controllers
                 message.AttachmentUrl,
                 message.AttachmentContentType,
                 message.EditedAt,
+                ReplyPreview = BuildGroupReplyPreview(replyPreview),
                 Mentions = ExtractMentions(message.Content),
-                Reactions = SummarizeReactions(reactions)
+                Reactions = SummarizeReactions(reactions),
+                Poll = poll
             };
         }
 
@@ -995,6 +1149,7 @@ namespace DiscordCloneServer.Controllers
         public Guid? ReplyToMessageId { get; set; }
         public string? AttachmentUrl { get; set; }
         public string? AttachmentContentType { get; set; }
+        public MessagePollDraft? Poll { get; set; }
     }
 
     public class EditGroupMessageRequest
