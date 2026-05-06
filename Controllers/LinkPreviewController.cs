@@ -15,7 +15,10 @@ namespace DiscordCloneServer.Controllers
             @"<title[^>]*>(?<value>.*?)</title>",
             RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
         private static readonly Regex MetaRegex = new(
-            @"<meta\s+[^>]*(?:property|name)=[""'](?<key>og:title|og:description|og:image|description)[""'][^>]*content=[""'](?<value>[^""']*)[""'][^>]*>|<meta\s+[^>]*content=[""'](?<value>[^""']*)[""'][^>]*(?:property|name)=[""'](?<key>og:title|og:description|og:image|description)[""'][^>]*>",
+            @"<meta\s+[^>]*(?:property|name)=[""'](?<key>og:title|og:description|og:image|og:site_name|og:type|og:video|og:video:url|og:audio|twitter:title|twitter:description|twitter:image|twitter:player|description|theme-color)[""'][^>]*content=[""'](?<value>[^""']*)[""'][^>]*>|<meta\s+[^>]*content=[""'](?<value>[^""']*)[""'][^>]*(?:property|name)=[""'](?<key>og:title|og:description|og:image|og:site_name|og:type|og:video|og:video:url|og:audio|twitter:title|twitter:description|twitter:image|twitter:player|description|theme-color)[""'][^>]*>",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+        private static readonly Regex IconLinkRegex = new(
+            @"<link\s+[^>]*rel=[""'][^""']*(?:icon|shortcut icon|apple-touch-icon)[^""']*[""'][^>]*href=[""'](?<value>[^""']+)[""'][^>]*>|<link\s+[^>]*href=[""'](?<value>[^""']+)[""'][^>]*rel=[""'][^""']*(?:icon|shortcut icon|apple-touch-icon)[^""']*[""'][^>]*>",
             RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
 
         private readonly IHttpClientFactory _httpClientFactory;
@@ -59,13 +62,19 @@ namespace DiscordCloneServer.Controllers
                 var mediaType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
                 if (!mediaType.Contains("html", StringComparison.OrdinalIgnoreCase))
                 {
+                    var directPreviewType = GetPreviewTypeForMedia(mediaType);
                     return Ok(new
                     {
                         url = uri.ToString(),
                         siteName = uri.Host,
                         title = uri.Host,
                         description = mediaType,
-                        image = (string?)null
+                        image = directPreviewType == "image" ? uri.ToString() : null,
+                        type = directPreviewType,
+                        mediaUrl = uri.ToString(),
+                        mediaContentType = mediaType,
+                        accentColor = (string?)null,
+                        icon = (string?)null
                     });
                 }
 
@@ -77,20 +86,37 @@ namespace DiscordCloneServer.Controllers
 
                 var meta = ExtractMeta(html);
                 var title = meta.GetValueOrDefault("og:title") ??
+                            meta.GetValueOrDefault("twitter:title") ??
                             Decode(TitleRegex.Match(html).Groups["value"].Value) ??
                             uri.Host;
                 var description = meta.GetValueOrDefault("og:description") ??
+                                  meta.GetValueOrDefault("twitter:description") ??
                                   meta.GetValueOrDefault("description") ??
                                   string.Empty;
-                var image = ResolvePreviewUrl(uri, meta.GetValueOrDefault("og:image"));
+                var image = ResolvePreviewUrl(
+                    uri,
+                    meta.GetValueOrDefault("og:image") ?? meta.GetValueOrDefault("twitter:image"));
+                var mediaUrl = ResolvePreviewUrl(
+                    uri,
+                    meta.GetValueOrDefault("og:video") ??
+                    meta.GetValueOrDefault("og:video:url") ??
+                    meta.GetValueOrDefault("twitter:player") ??
+                    meta.GetValueOrDefault("og:audio"));
+                var icon = ResolvePreviewUrl(uri, Decode(IconLinkRegex.Match(html).Groups["value"].Value));
+                var previewType = GetPreviewType(meta.GetValueOrDefault("og:type"), mediaUrl);
 
                 return Ok(new
                 {
                     url = uri.ToString(),
-                    siteName = uri.Host,
+                    siteName = meta.GetValueOrDefault("og:site_name") ?? uri.Host,
                     title,
                     description,
-                    image
+                    image,
+                    type = previewType,
+                    mediaUrl,
+                    mediaContentType = (string?)null,
+                    accentColor = NormalizeColor(meta.GetValueOrDefault("theme-color")),
+                    icon
                 });
             }
             catch (Exception ex)
@@ -142,6 +168,81 @@ namespace DiscordCloneServer.Controllers
             return resolved.Scheme == Uri.UriSchemeHttp || resolved.Scheme == Uri.UriSchemeHttps
                 ? resolved.ToString()
                 : null;
+        }
+
+        private static string GetPreviewTypeForMedia(string? mediaType)
+        {
+            if (string.IsNullOrWhiteSpace(mediaType))
+            {
+                return "file";
+            }
+
+            if (mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "image";
+            }
+
+            if (mediaType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "video";
+            }
+
+            if (mediaType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "audio";
+            }
+
+            return "file";
+        }
+
+        private static string GetPreviewType(string? ogType, string? mediaUrl)
+        {
+            var normalized = ogType?.Trim().ToLowerInvariant() ?? string.Empty;
+            if (normalized.Contains("video") || LooksLikeMediaUrl(mediaUrl, "video"))
+            {
+                return "video";
+            }
+
+            if (normalized.Contains("audio") || LooksLikeMediaUrl(mediaUrl, "audio"))
+            {
+                return "audio";
+            }
+
+            if (normalized.Contains("image"))
+            {
+                return "image";
+            }
+
+            return "article";
+        }
+
+        private static bool LooksLikeMediaUrl(string? value, string kind)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var extensionPattern = kind == "video"
+                ? @"\.(mp4|webm|mov)(?:[?#].*)?$"
+                : @"\.(mp3|wav|ogg|m4a)(?:[?#].*)?$";
+            return Regex.IsMatch(value, extensionPattern, RegexOptions.IgnoreCase);
+        }
+
+        private static string? NormalizeColor(string? value)
+        {
+            var color = value?.Trim();
+            if (string.IsNullOrWhiteSpace(color))
+            {
+                return null;
+            }
+
+            if (Regex.IsMatch(color, "^#?[0-9a-fA-F]{6}$"))
+            {
+                return color.StartsWith('#') ? color : $"#{color}";
+            }
+
+            return null;
         }
 
         private static async Task<bool> IsPublicHttpUrl(Uri uri)
