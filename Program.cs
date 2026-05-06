@@ -131,7 +131,9 @@ namespace DiscordCloneServer
                              return;
                          }
 
-                         session.LastSeenAt = DateTime.UtcNow;
+                         var now = DateTime.UtcNow;
+                         session.LastSeenAt = now;
+                         account.LastActiveAt = now;
                          await db.SaveChangesAsync();
                      }
                  };
