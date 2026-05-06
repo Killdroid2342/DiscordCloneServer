@@ -44,6 +44,18 @@ namespace DiscordCloneServer.Controllers
         private const int MaxWelcomeMessageLength = 600;
         private const int MaxWelcomeChecklistItems = 6;
         private const int MaxWelcomeChecklistItemLength = 120;
+        private const int MaxProfileBadgeCount = 6;
+        private static readonly HashSet<string> ProfileBadgeIds = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "early-member",
+            "community-helper",
+            "server-builder",
+            "bug-hunter",
+            "developer",
+            "artist",
+            "gamer",
+            "music-fan"
+        };
 
         public ServerController(ApiContext context, IConfiguration config, IHubContext<ChatHub> hubContext)
         {
@@ -219,6 +231,13 @@ namespace DiscordCloneServer.Controllers
             public string Id { get; set; } = string.Empty;
             public string Username { get; set; } = string.Empty;
             public string Role { get; set; } = "user";
+            public string? ProfilePictureUrl { get; set; }
+            public string PresenceStatus { get; set; } = "online";
+            public string CustomStatus { get; set; } = string.Empty;
+            public string ActivityStatus { get; set; } = string.Empty;
+            public DateTime? LastActiveAt { get; set; }
+            public bool ShowActivity { get; set; } = true;
+            public string[] Badges { get; set; } = Array.Empty<string>();
             public bool IsMuted { get; set; }
             public DateTime? MutedUntil { get; set; }
             public bool IsTimedOut { get; set; }
@@ -261,6 +280,99 @@ namespace DiscordCloneServer.Controllers
                 IsTimedOut = timeoutUntil != null,
                 TimedOutUntil = timeoutUntil
             };
+        }
+
+        private static void ApplyMemberAccountData(ServerMemberResponse member, Account? account)
+        {
+            if (account == null)
+            {
+                return;
+            }
+
+            member.ProfilePictureUrl = account.ProfilePictureUrl;
+            member.PresenceStatus = GetPublicPresenceStatus(account);
+            member.ShowActivity = account.PrivacyShowActivity;
+            member.CustomStatus = account.PrivacyShowActivity ? GetCustomStatus(account) : string.Empty;
+            member.ActivityStatus = account.PrivacyShowActivity ? NormalizeActivityStatus(account.ActivityStatus) : string.Empty;
+            member.LastActiveAt = account.PrivacyShowActivity ? account.LastActiveAt : null;
+            member.Badges = GetProfileBadges(account);
+        }
+
+        private static string GetPublicPresenceStatus(Account account)
+        {
+            var normalized = NormalizePresenceStatus(account.PresenceStatus);
+            return normalized == "invisible" ? "offline" : normalized;
+        }
+
+        private static string NormalizePresenceStatus(string? status)
+        {
+            var normalized = status?.Trim().ToLowerInvariant();
+            return normalized is "online" or "idle" or "do-not-disturb" or "invisible"
+                ? normalized
+                : "online";
+        }
+
+        private static string NormalizeActivityStatus(string? activityStatus)
+        {
+            var normalized = (activityStatus ?? string.Empty).Trim();
+            return normalized.Length <= 120 ? normalized : normalized[..120];
+        }
+
+        private static string GetCustomStatus(Account account)
+        {
+            if (string.IsNullOrWhiteSpace(account.SettingsJson))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(account.SettingsJson);
+                if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                    document.RootElement.TryGetProperty("customStatus", out var customStatus) &&
+                    customStatus.ValueKind == JsonValueKind.String)
+                {
+                    return customStatus.GetString()?.Trim() ?? string.Empty;
+                }
+            }
+            catch
+            {
+                return string.Empty;
+            }
+
+            return string.Empty;
+        }
+
+        private static string[] GetProfileBadges(Account account)
+        {
+            if (string.IsNullOrWhiteSpace(account.SettingsJson))
+            {
+                return Array.Empty<string>();
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(account.SettingsJson);
+                if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                    !document.RootElement.TryGetProperty("profileBadges", out var badges) ||
+                    badges.ValueKind != JsonValueKind.Array)
+                {
+                    return Array.Empty<string>();
+                }
+
+                return badges
+                    .EnumerateArray()
+                    .Where(badge => badge.ValueKind == JsonValueKind.String)
+                    .Select(badge => badge.GetString()?.Trim().ToLowerInvariant() ?? string.Empty)
+                    .Where(badge => ProfileBadgeIds.Contains(badge))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(MaxProfileBadgeCount)
+                    .ToArray();
+            }
+            catch
+            {
+                return Array.Empty<string>();
+            }
         }
 
         private static bool TryGetModerationUntil(
@@ -870,6 +982,17 @@ namespace DiscordCloneServer.Controllers
                 .OrderBy(member => member.Role == "owner" ? 0 : 1)
                 .ThenBy(member => member.Username)
                 .ToList();
+
+            var usernames = dedupedMembers.Select(member => member.Username).ToList();
+            var accounts = await _context.Accounts
+                .Where(account => usernames.Contains(account.UserName) && !account.IsDisabled)
+                .ToDictionaryAsync(account => account.UserName, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var member in dedupedMembers)
+            {
+                accounts.TryGetValue(member.Username, out var account);
+                ApplyMemberAccountData(member, account);
+            }
 
             return Ok(dedupedMembers);
         }
@@ -1659,7 +1782,21 @@ namespace DiscordCloneServer.Controllers
                 .Take(50)
                 .ToListAsync();
 
-            return Ok(members.Select(member => BuildMemberResponse(member, member.Username, member.Role, now)));
+            var memberResponses = members
+                .Select(member => BuildMemberResponse(member, member.Username, member.Role, now))
+                .ToList();
+            var usernames = memberResponses.Select(member => member.Username).ToList();
+            var accounts = await _context.Accounts
+                .Where(account => usernames.Contains(account.UserName) && !account.IsDisabled)
+                .ToDictionaryAsync(account => account.UserName, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var member in memberResponses)
+            {
+                accounts.TryGetValue(member.Username, out var account);
+                ApplyMemberAccountData(member, account);
+            }
+
+            return Ok(memberResponses);
         }
 
         [HttpGet]
