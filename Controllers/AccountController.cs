@@ -3,6 +3,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using DiscordCloneServer.Data;
 using DiscordCloneServer.Models;
@@ -28,6 +29,12 @@ namespace DiscordCloneServer.Controllers
         private const int BackupCodeCount = 10;
         private const int BackupCodeCharacters = 10;
         private const int MaxSettingsJsonBytes = 32768;
+        private const int MaxCustomStatusLength = 128;
+        private const int MaxActivityStatusLength = 120;
+        private const int MaxUserBioLength = 280;
+        private const int MaxProfileBadgeCount = 6;
+        private const string CustomStatusSettingsKey = "customStatus";
+        private const string ProfileBadgesSettingsKey = "profileBadges";
         private const string DeletedUserName = "Deleted User";
         private const string Base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -45,6 +52,24 @@ namespace DiscordCloneServer.Controllers
             "everyone",
             "friends",
             "none"
+        };
+        private static readonly HashSet<string> AccountStandings = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "good",
+            "limited",
+            "at-risk",
+            "suspended"
+        };
+        private static readonly HashSet<string> ProfileBadgeIds = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "early-member",
+            "community-helper",
+            "server-builder",
+            "bug-hunter",
+            "developer",
+            "artist",
+            "gamer",
+            "music-fan"
         };
 
         private readonly ApiContext _context;
@@ -101,6 +126,12 @@ namespace DiscordCloneServer.Controllers
                 account.Groups = Array.Empty<string>();
                 account.BlockedUsers = Array.Empty<string>();
                 account.PresenceStatus = "online";
+                account.ActivityStatus = string.Empty;
+                account.LastActiveAt = DateTime.UtcNow;
+                account.AccountStanding = "good";
+                account.TrustScore = 60;
+                account.StandingReason = null;
+                account.StandingUpdatedAt = DateTime.UtcNow;
                 account.PrivacyDmPolicy = "friends";
                 account.PrivacyAllowFriendRequestsEveryone = true;
                 account.PrivacyAllowFriendRequestsFriendsOfFriends = true;
@@ -755,6 +786,36 @@ namespace DiscordCloneServer.Controllers
             }
         }
 
+        [HttpGet]
+        public IActionResult GetFriendProfiles()
+        {
+            try
+            {
+                var account = GetCurrentAccount();
+                if (account == null)
+                {
+                    return NotFound(new { message = "User not found" });
+                }
+
+                var friends = account.Friends ?? Array.Empty<string>();
+                var friendSet = friends.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var profiles = _context.Accounts
+                    .Where(friend => friendSet.Contains(friend.UserName) && !friend.IsDisabled)
+                    .ToList()
+                    .Select(BuildProfileSummary)
+                    .OrderBy(friend => Array.FindIndex(friends, name =>
+                        string.Equals(name, friend.Username, StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
+
+                return Ok(profiles);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"couldnt get friend profiles: {ex.Message}");
+                return StatusCode(500, new { message = "Internal server error" });
+            }
+        }
+
         [HttpPost]
         [EnableRateLimiting("friend")]
         public IActionResult RemoveFriend(string friendUsername)
@@ -863,8 +924,14 @@ namespace DiscordCloneServer.Controllers
                     profilePictureUrl = account.ProfilePictureUrl,
                     profileBannerUrl = account.ProfileBannerUrl,
                     profileBannerColor = account.ProfileBannerColor,
+                    bio = account.Description,
                     description = account.Description,
-                    presenceStatus = account.PresenceStatus,
+                    badges = GetProfileBadges(account),
+                    profileBadges = GetProfileBadges(account),
+                    presenceStatus = GetPublicPresenceStatus(account),
+                    customStatus = CanViewActivity(account) ? GetCustomStatus(account) : string.Empty,
+                    activityStatus = CanViewActivity(account) ? NormalizeActivityStatus(account.ActivityStatus) ?? string.Empty : string.Empty,
+                    lastActiveAt = CanViewActivity(account) ? account.LastActiveAt : null,
                     showActivity = account.PrivacyShowActivity
                 });
             }
@@ -891,7 +958,21 @@ namespace DiscordCloneServer.Controllers
                 var profileBannerColor = string.IsNullOrWhiteSpace(request.ProfileBannerColor)
                     ? "#0c0c0c"
                     : request.ProfileBannerColor.Trim();
-                var description = request.Description?.Trim() ?? string.Empty;
+                var bio = NormalizeBio(request.Bio ?? request.Description);
+                if (bio == null)
+                {
+                    return BadRequest(new { message = $"Profile bio must be {MaxUserBioLength} characters or less." });
+                }
+
+                string[]? profileBadges = null;
+                if (request.Badges != null || request.ProfileBadges != null)
+                {
+                    profileBadges = NormalizeProfileBadges(request.Badges ?? request.ProfileBadges, out var badgeError);
+                    if (profileBadges == null)
+                    {
+                        return BadRequest(new { message = badgeError });
+                    }
+                }
 
                 if (!IsValidProfileUrl(profilePictureUrl))
                 {
@@ -908,15 +989,14 @@ namespace DiscordCloneServer.Controllers
                     return BadRequest(new { message = "Profile banner color must be a valid hex color." });
                 }
 
-                if (description.Length > 280)
-                {
-                    return BadRequest(new { message = "Profile description must be 280 characters or less." });
-                }
-
                 account.ProfilePictureUrl = profilePictureUrl;
                 account.ProfileBannerUrl = profileBannerUrl;
                 account.ProfileBannerColor = profileBannerColor;
-                account.Description = description;
+                account.Description = bio;
+                if (profileBadges != null)
+                {
+                    SetProfileBadges(account, profileBadges);
+                }
 
                 _context.SaveChanges();
                 return Ok(new { message = "Profile updated successfully." });
@@ -1292,8 +1372,74 @@ namespace DiscordCloneServer.Controllers
             }
 
             account.PresenceStatus = status;
+            account.LastActiveAt = DateTime.UtcNow;
+            if (request.CustomStatus != null)
+            {
+                var customStatus = NormalizeCustomStatus(request.CustomStatus);
+                if (customStatus == null)
+                {
+                    return BadRequest(new { message = $"Custom status must be {MaxCustomStatusLength} characters or less." });
+                }
+
+                SetCustomStatus(account, customStatus);
+            }
+
             _context.SaveChanges();
             return Ok(BuildAccountSettingsResponse(account));
+        }
+
+        [HttpPost]
+        public IActionResult UpdateCustomStatus([FromBody] CustomStatusUpdateRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            var customStatus = NormalizeCustomStatus(request.CustomStatus);
+            if (customStatus == null)
+            {
+                return BadRequest(new { message = $"Custom status must be {MaxCustomStatusLength} characters or less." });
+            }
+
+            SetCustomStatus(account, customStatus);
+            account.LastActiveAt = DateTime.UtcNow;
+            _context.SaveChanges();
+            return Ok(BuildAccountSettingsResponse(account));
+        }
+
+        [HttpPost]
+        public IActionResult UpdateActivityStatus([FromBody] ActivityStatusUpdateRequest request)
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            var activityStatus = NormalizeActivityStatus(request.ActivityStatus);
+            if (activityStatus == null)
+            {
+                return BadRequest(new { message = $"Activity status must be {MaxActivityStatusLength} characters or less." });
+            }
+
+            account.ActivityStatus = activityStatus;
+            account.LastActiveAt = DateTime.UtcNow;
+            _context.SaveChanges();
+            return Ok(BuildAccountSettingsResponse(account));
+        }
+
+        [HttpGet]
+        public IActionResult GetAccountStanding()
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            return Ok(BuildAccountStandingResponse(account));
         }
 
         [HttpPost]
@@ -1422,6 +1568,7 @@ namespace DiscordCloneServer.Controllers
 
         private SessionTokenResponse CreateSession(Account account)
         {
+            var now = DateTime.UtcNow;
             var refreshToken = GenerateOpaqueToken();
             var session = new AccountSession
             {
@@ -1429,15 +1576,16 @@ namespace DiscordCloneServer.Controllers
                 AccountId = account.Id,
                 Username = account.UserName,
                 RefreshTokenHash = HashToken(refreshToken),
-                CreatedAt = DateTime.UtcNow,
-                LastSeenAt = DateTime.UtcNow,
-                ExpiresAt = DateTime.UtcNow.AddDays(RefreshTokenDays),
+                CreatedAt = now,
+                LastSeenAt = now,
+                ExpiresAt = now.AddDays(RefreshTokenDays),
                 UserAgent = HttpContext?.Request.Headers.UserAgent.ToString(),
                 IpAddress = HttpContext?.Connection.RemoteIpAddress?.ToString()
             };
 
             _context.AccountSessions.Add(session);
-            var expiresAt = DateTime.UtcNow.AddHours(AccessTokenHours);
+            account.LastActiveAt = now;
+            var expiresAt = now.AddHours(AccessTokenHours);
 
             return new SessionTokenResponse
             {
@@ -1898,6 +2046,11 @@ namespace DiscordCloneServer.Controllers
                 return AccessTokenValidationResult.Invalid;
             }
 
+            var now = DateTime.UtcNow;
+            session.LastSeenAt = now;
+            account.LastActiveAt = now;
+            _context.SaveChanges();
+
             return AccessTokenValidationResult.Valid;
         }
 
@@ -1941,8 +2094,15 @@ namespace DiscordCloneServer.Controllers
                 profilePictureUrl = account.ProfilePictureUrl,
                 profileBannerUrl = account.ProfileBannerUrl,
                 profileBannerColor = account.ProfileBannerColor ?? "#0c0c0c",
+                bio = account.Description,
                 description = account.Description,
+                badges = GetProfileBadges(account),
+                profileBadges = GetProfileBadges(account),
                 presenceStatus = NormalizePresenceStatus(account.PresenceStatus) ?? "online",
+                customStatus = GetCustomStatus(account),
+                activityStatus = NormalizeActivityStatus(account.ActivityStatus) ?? string.Empty,
+                lastActiveAt = account.LastActiveAt,
+                accountStanding = BuildAccountStandingResponse(account),
                 privacy = new
                 {
                     dmPolicy = NormalizeDmPolicy(account.PrivacyDmPolicy) ?? "friends",
@@ -1956,6 +2116,173 @@ namespace DiscordCloneServer.Controllers
                 voiceChangerSettingsJson = string.IsNullOrWhiteSpace(account.VoiceChangerSettingsJson)
                     ? "{}"
                     : account.VoiceChangerSettingsJson
+            };
+        }
+
+        private AccountStandingResponse BuildAccountStandingResponse(Account account)
+        {
+            var trustScore = CalculateTrustScore(account, out var signals);
+            var standingFromScore = GetStandingFromTrustScore(trustScore);
+            var storedStanding = NormalizeAccountStanding(account.AccountStanding) ?? "good";
+            var standing = MoreRestrictiveStanding(storedStanding, standingFromScore);
+
+            return new AccountStandingResponse
+            {
+                Standing = standing,
+                Label = GetStandingLabel(standing),
+                TrustScore = trustScore,
+                Summary = GetStandingSummary(standing),
+                Reason = string.IsNullOrWhiteSpace(account.StandingReason) ? null : account.StandingReason,
+                UpdatedAt = account.StandingUpdatedAt,
+                Signals = signals
+            };
+        }
+
+        private int CalculateTrustScore(Account account, out string[] signals)
+        {
+            var signalList = new List<string>();
+            var score = Math.Clamp(account.TrustScore, 0, 100);
+            var now = DateTime.UtcNow;
+
+            if (account.EmailVerifiedAt != null)
+            {
+                score += 10;
+                signalList.Add("Email verified");
+            }
+            else
+            {
+                signalList.Add("Email not verified");
+            }
+
+            if (account.PhoneNumberVerifiedAt != null)
+            {
+                score += 10;
+                signalList.Add("Phone verified");
+            }
+
+            if (account.TwoFactorEnabled)
+            {
+                score += 10;
+                signalList.Add("Two-factor enabled");
+            }
+
+            var accountAge = now - account.CreatedAt;
+            if (accountAge.TotalDays >= 7)
+            {
+                score += 10;
+                signalList.Add("Established account");
+            }
+            else if (accountAge.TotalHours < 24)
+            {
+                signalList.Add("New account");
+            }
+
+            var recentReportCutoff = now.AddDays(-90);
+            var activeReportCount = _context.UserReports.Count(report =>
+                report.TargetUsername == account.UserName &&
+                report.CreatedAt >= recentReportCutoff &&
+                report.Status != "dismissed");
+            if (activeReportCount > 0)
+            {
+                score -= activeReportCount * 12;
+                signalList.Add($"{activeReportCount} recent report{(activeReportCount == 1 ? "" : "s")} under review");
+            }
+
+            score = Math.Clamp(score, 0, 100);
+            if (signalList.Count == 0)
+            {
+                signalList.Add("No recent account issues");
+            }
+
+            signals = signalList.ToArray();
+            return score;
+        }
+
+        private static string GetStandingFromTrustScore(int trustScore)
+        {
+            return trustScore switch
+            {
+                >= 60 => "good",
+                >= 35 => "limited",
+                >= 15 => "at-risk",
+                _ => "suspended"
+            };
+        }
+
+        private static string MoreRestrictiveStanding(string left, string right)
+        {
+            return GetStandingRank(left) >= GetStandingRank(right) ? left : right;
+        }
+
+        private static int GetStandingRank(string standing)
+        {
+            return standing switch
+            {
+                "suspended" => 3,
+                "at-risk" => 2,
+                "limited" => 1,
+                _ => 0
+            };
+        }
+
+        private static string GetStandingLabel(string standing)
+        {
+            return standing switch
+            {
+                "limited" => "Limited",
+                "at-risk" => "At Risk",
+                "suspended" => "Suspended",
+                _ => "Good"
+            };
+        }
+
+        private static string GetStandingSummary(string standing)
+        {
+            return standing switch
+            {
+                "limited" => "Some safety checks may apply while your account builds more trust.",
+                "at-risk" => "Recent safety signals may limit sensitive actions until reviewed.",
+                "suspended" => "This account has major restrictions applied.",
+                _ => "No restrictions are applied to this account."
+            };
+        }
+
+        private sealed class AccountStandingResponse
+        {
+            public string Standing { get; set; } = "good";
+            public string Label { get; set; } = "Good";
+            public int TrustScore { get; set; }
+            public string Summary { get; set; } = string.Empty;
+            public string? Reason { get; set; }
+            public DateTime? UpdatedAt { get; set; }
+            public string[] Signals { get; set; } = Array.Empty<string>();
+        }
+
+        private sealed class ProfileSummaryResponse
+        {
+            public string Username { get; set; } = string.Empty;
+            public string? ProfilePictureUrl { get; set; }
+            public string PresenceStatus { get; set; } = "online";
+            public string CustomStatus { get; set; } = string.Empty;
+            public string ActivityStatus { get; set; } = string.Empty;
+            public DateTime? LastActiveAt { get; set; }
+            public bool ShowActivity { get; set; } = true;
+            public string[] Badges { get; set; } = Array.Empty<string>();
+        }
+
+        private ProfileSummaryResponse BuildProfileSummary(Account account)
+        {
+            var showActivity = CanViewActivity(account);
+            return new ProfileSummaryResponse
+            {
+                Username = account.UserName,
+                ProfilePictureUrl = account.ProfilePictureUrl,
+                PresenceStatus = GetPublicPresenceStatus(account),
+                CustomStatus = showActivity ? GetCustomStatus(account) : string.Empty,
+                ActivityStatus = showActivity ? NormalizeActivityStatus(account.ActivityStatus) ?? string.Empty : string.Empty,
+                LastActiveAt = showActivity ? account.LastActiveAt : null,
+                ShowActivity = account.PrivacyShowActivity,
+                Badges = GetProfileBadges(account)
             };
         }
 
@@ -2225,6 +2552,33 @@ namespace DiscordCloneServer.Controllers
                 : null;
         }
 
+        private static string GetPublicPresenceStatus(Account account)
+        {
+            var normalized = NormalizePresenceStatus(account.PresenceStatus) ?? "online";
+            return normalized == "invisible" ? "offline" : normalized;
+        }
+
+        private bool CanViewActivity(Account account)
+        {
+            var currentUsername = GetCurrentUsername();
+            return account.PrivacyShowActivity ||
+                   string.Equals(account.UserName, currentUsername, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string? NormalizeActivityStatus(string? activityStatus)
+        {
+            var normalized = Regex.Replace(activityStatus ?? string.Empty, @"\s+", " ").Trim();
+            return normalized.Length <= MaxActivityStatusLength ? normalized : null;
+        }
+
+        private static string? NormalizeAccountStanding(string? standing)
+        {
+            var normalized = standing?.Trim().ToLowerInvariant();
+            return !string.IsNullOrWhiteSpace(normalized) && AccountStandings.Contains(normalized)
+                ? normalized
+                : null;
+        }
+
         private static string? NormalizeDmPolicy(string? policy)
         {
             var normalized = policy?.Trim().ToLowerInvariant();
@@ -2253,6 +2607,146 @@ namespace DiscordCloneServer.Controllers
 
             json = rawJson;
             return true;
+        }
+
+        private static JsonObject GetSettingsObject(Account account)
+        {
+            if (string.IsNullOrWhiteSpace(account.SettingsJson))
+            {
+                return new JsonObject();
+            }
+
+            try
+            {
+                return JsonNode.Parse(account.SettingsJson) as JsonObject ?? new JsonObject();
+            }
+            catch
+            {
+                return new JsonObject();
+            }
+        }
+
+        private static string GetCustomStatus(Account account)
+        {
+            var settings = GetSettingsObject(account);
+            try
+            {
+                var value = settings[CustomStatusSettingsKey]?.GetValue<string>() ?? string.Empty;
+                return NormalizeCustomStatus(value) ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static string? NormalizeCustomStatus(string? customStatus)
+        {
+            var normalized = Regex.Replace(customStatus ?? string.Empty, @"\s+", " ").Trim();
+            return normalized.Length <= MaxCustomStatusLength ? normalized : null;
+        }
+
+        private static void SetCustomStatus(Account account, string customStatus)
+        {
+            var settings = GetSettingsObject(account);
+            if (string.IsNullOrWhiteSpace(customStatus))
+            {
+                settings.Remove(CustomStatusSettingsKey);
+            }
+            else
+            {
+                settings[CustomStatusSettingsKey] = customStatus;
+            }
+
+            var nextJson = settings.ToJsonString();
+            if (Encoding.UTF8.GetByteCount(nextJson) <= MaxSettingsJsonBytes)
+            {
+                account.SettingsJson = nextJson;
+            }
+        }
+
+        private static string? NormalizeBio(string? bio)
+        {
+            var normalized = (bio ?? string.Empty).Trim();
+            return normalized.Length <= MaxUserBioLength ? normalized : null;
+        }
+
+        private static string[]? NormalizeProfileBadges(IEnumerable<string>? badges, out string error)
+        {
+            error = string.Empty;
+            var normalizedBadges = (badges ?? Array.Empty<string>())
+                .Select(badge => badge?.Trim().ToLowerInvariant() ?? string.Empty)
+                .Where(badge => !string.IsNullOrWhiteSpace(badge))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (normalizedBadges.Length > MaxProfileBadgeCount)
+            {
+                error = $"Choose up to {MaxProfileBadgeCount} profile badges.";
+                return null;
+            }
+
+            var unsupportedBadge = normalizedBadges.FirstOrDefault(badge => !ProfileBadgeIds.Contains(badge));
+            if (!string.IsNullOrWhiteSpace(unsupportedBadge))
+            {
+                error = "One or more profile badges are not available.";
+                return null;
+            }
+
+            return normalizedBadges;
+        }
+
+        private static string[] GetProfileBadges(Account account)
+        {
+            var settings = GetSettingsObject(account);
+            if (settings[ProfileBadgesSettingsKey] is not JsonArray badges)
+            {
+                return Array.Empty<string>();
+            }
+
+            var profileBadges = new List<string>();
+            foreach (var badgeNode in badges)
+            {
+                try
+                {
+                    var badge = badgeNode?.GetValue<string>()?.Trim().ToLowerInvariant();
+                    if (!string.IsNullOrWhiteSpace(badge) &&
+                        ProfileBadgeIds.Contains(badge) &&
+                        !profileBadges.Contains(badge, StringComparer.OrdinalIgnoreCase))
+                    {
+                        profileBadges.Add(badge);
+                    }
+                }
+                catch
+                {
+                    // Ignore malformed badge entries in older or manually edited settings JSON.
+                }
+            }
+
+            return profileBadges.Take(MaxProfileBadgeCount).ToArray();
+        }
+
+        private static void SetProfileBadges(Account account, IReadOnlyCollection<string> badges)
+        {
+            var settings = GetSettingsObject(account);
+            settings.Remove(ProfileBadgesSettingsKey);
+
+            if (badges.Count > 0)
+            {
+                var badgeArray = new JsonArray();
+                foreach (var badge in badges)
+                {
+                    badgeArray.Add(badge);
+                }
+
+                settings[ProfileBadgesSettingsKey] = badgeArray;
+            }
+
+            var nextJson = settings.ToJsonString();
+            if (Encoding.UTF8.GetByteCount(nextJson) <= MaxSettingsJsonBytes)
+            {
+                account.SettingsJson = nextJson;
+            }
         }
 
         private static bool ContainsValue(string[]? values, string value)
@@ -2333,7 +2827,10 @@ namespace DiscordCloneServer.Controllers
         public string? ProfilePictureUrl { get; set; }
         public string? ProfileBannerUrl { get; set; }
         public string? ProfileBannerColor { get; set; }
+        public string? Bio { get; set; }
         public string? Description { get; set; }
+        public string[]? Badges { get; set; }
+        public string[]? ProfileBadges { get; set; }
     }
 
     public class AccountSettingsUpdateRequest
@@ -2377,6 +2874,17 @@ namespace DiscordCloneServer.Controllers
     public class PresenceUpdateRequest
     {
         public string PresenceStatus { get; set; } = "online";
+        public string? CustomStatus { get; set; }
+    }
+
+    public class CustomStatusUpdateRequest
+    {
+        public string? CustomStatus { get; set; }
+    }
+
+    public class ActivityStatusUpdateRequest
+    {
+        public string? ActivityStatus { get; set; }
     }
 
     public class PrivacySettingsUpdateRequest
