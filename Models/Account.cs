@@ -25,6 +25,12 @@ namespace DiscordCloneServer.Models
         public DateTime? EmailVerifiedAt { get; set; }
         public DateTime? PhoneNumberVerifiedAt { get; set; }
         public string PresenceStatus { get; set; } = "online";
+        public string ActivityStatus { get; set; } = string.Empty;
+        public DateTime? LastActiveAt { get; set; }
+        public string AccountStanding { get; set; } = "good";
+        public int TrustScore { get; set; } = 60;
+        public string? StandingReason { get; set; }
+        public DateTime? StandingUpdatedAt { get; set; }
         public string PrivacyDmPolicy { get; set; } = "friends";
         public bool PrivacyAllowFriendRequestsEveryone { get; set; } = true;
         public bool PrivacyAllowFriendRequestsFriendsOfFriends { get; set; } = true;
