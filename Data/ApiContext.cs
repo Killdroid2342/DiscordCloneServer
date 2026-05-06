@@ -21,6 +21,8 @@ namespace DiscordCloneServer.Data
         public DbSet<ServerRole> ServerRoles { get; set; }
         public DbSet<ServerBan> ServerBans { get; set; }
         public DbSet<ServerInvite> ServerInvites { get; set; }
+        public DbSet<ServerEmoji> ServerEmojis { get; set; }
+        public DbSet<ServerSticker> ServerStickers { get; set; }
         public DbSet<MessageReaction> MessageReactions { get; set; }
         public DbSet<MessagePoll> MessagePolls { get; set; }
         public DbSet<MessagePollOption> MessagePollOptions { get; set; }
@@ -263,6 +265,38 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<ServerInvite>().ToTable("Server_Invites");
             modelBuilder.Entity<ServerInvite>()
                 .HasIndex(invite => invite.Code)
+                .IsUnique();
+            modelBuilder.Entity<ServerEmoji>().ToTable("Server_Emojis");
+            modelBuilder.Entity<ServerEmoji>()
+                .Property(emoji => emoji.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerEmoji>()
+                .Property(emoji => emoji.Name)
+                .HasMaxLength(32);
+            modelBuilder.Entity<ServerEmoji>()
+                .Property(emoji => emoji.ImageUrl)
+                .HasMaxLength(2048);
+            modelBuilder.Entity<ServerEmoji>()
+                .Property(emoji => emoji.CreatedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerEmoji>()
+                .HasIndex(emoji => new { emoji.ServerId, emoji.Name })
+                .IsUnique();
+            modelBuilder.Entity<ServerSticker>().ToTable("Server_Stickers");
+            modelBuilder.Entity<ServerSticker>()
+                .Property(sticker => sticker.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerSticker>()
+                .Property(sticker => sticker.Name)
+                .HasMaxLength(32);
+            modelBuilder.Entity<ServerSticker>()
+                .Property(sticker => sticker.ImageUrl)
+                .HasMaxLength(2048);
+            modelBuilder.Entity<ServerSticker>()
+                .Property(sticker => sticker.CreatedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerSticker>()
+                .HasIndex(sticker => new { sticker.ServerId, sticker.Name })
                 .IsUnique();
             modelBuilder.Entity<MessageReaction>().ToTable("Message_Reactions");
             modelBuilder.Entity<MessageReaction>()
