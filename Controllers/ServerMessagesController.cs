@@ -135,10 +135,12 @@ namespace DiscordCloneServer.Controllers
                 var reactions = await _context.MessageReactions
                     .Where(reaction => reaction.ScopeType == "server" && messageIds.Contains(reaction.MessageId))
                     .ToListAsync();
+                var threadSummaries = await GetThreadSummariesForParentMessages(messageIds);
 
                 return Ok(page.Select(message => BuildMessageResponse(
                     message,
-                    reactions.Where(reaction => reaction.MessageId == message.MessageID))));
+                    reactions.Where(reaction => reaction.MessageId == message.MessageID),
+                    threadSummaries.GetValueOrDefault(message.MessageID))));
             }
             catch (Exception ex)
             {
@@ -195,6 +197,19 @@ namespace DiscordCloneServer.Controllers
             if (message.MessagesUserSender != username && !canManage)
                 return Forbid();
 
+            var childThreads = await _context.ServerThreads
+                .Where(thread => thread.ParentMessageId == message.MessageID)
+                .ToListAsync();
+            if (childThreads.Count > 0)
+            {
+                var childThreadIds = childThreads.Select(thread => thread.ThreadId).ToList();
+                var childThreadMessages = await _context.ServerThreadMessages
+                    .Where(threadMessage => childThreadIds.Contains(threadMessage.ThreadId))
+                    .ToListAsync();
+                _context.ServerThreadMessages.RemoveRange(childThreadMessages);
+                _context.ServerThreads.RemoveRange(childThreads);
+            }
+
             _context.ServerMessages.Remove(message);
             await _context.SaveChangesAsync();
             return Ok(new { message = "Message deleted." });
@@ -249,6 +264,281 @@ namespace DiscordCloneServer.Controllers
             return Ok(filtered.Select(message => BuildMessageResponse(
                 message,
                 reactions.Where(reaction => reaction.MessageId == message.MessageID))));
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetPinnedMessages(string channelId)
+        {
+            var username = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(username))
+                return Unauthorized(new { message = "Missing user identity." });
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == channelId);
+            if (channel == null)
+                return NotFound(new { message = "Channel not found." });
+            if (!await IsServerMember(channel.ServerId, username))
+                return Forbid();
+
+            var pinnedMessages = await _context.ServerMessages
+                .Where(message => message.ChannelId == channelId && message.IsPinned)
+                .OrderByDescending(message => message.PinnedAt ?? DateTime.MinValue)
+                .ToListAsync();
+            var messageIds = pinnedMessages.Select(message => message.MessageID).ToList();
+            var reactions = await _context.MessageReactions
+                .Where(reaction => reaction.ScopeType == "server" && messageIds.Contains(reaction.MessageId))
+                .ToListAsync();
+            var threadSummaries = await GetThreadSummariesForParentMessages(messageIds);
+
+            return Ok(pinnedMessages.Select(message => BuildMessageResponse(
+                message,
+                reactions.Where(reaction => reaction.MessageId == message.MessageID),
+                threadSummaries.GetValueOrDefault(message.MessageID))));
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> SetPinnedMessage([FromBody] PinMessageRequest request)
+        {
+            var username = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(username))
+                return Unauthorized(new { message = "Missing user identity." });
+
+            var messageId = request.MessageId?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(messageId))
+                return BadRequest(new { message = "Message id is required." });
+
+            var message = await _context.ServerMessages.FirstOrDefaultAsync(m => m.MessageID == messageId);
+            if (message == null)
+                return NotFound(new { message = "Message not found." });
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == message.ChannelId);
+            if (channel == null || !await IsServerMember(channel.ServerId, username))
+                return Forbid();
+
+            if (!await CanPinMessage(message, channel, username))
+                return Forbid();
+
+            if (request.IsPinned)
+            {
+                message.IsPinned = true;
+                message.PinnedBy = username;
+                message.PinnedAt ??= DateTime.UtcNow;
+            }
+            else
+            {
+                message.IsPinned = false;
+                message.PinnedBy = null;
+                message.PinnedAt = null;
+            }
+
+            await _context.SaveChangesAsync();
+            var threadSummaries = await GetThreadSummariesForParentMessages(new[] { message.MessageID });
+            return Ok(BuildMessageResponse(
+                message,
+                await GetReactionsForMessage("server", message.MessageID),
+                threadSummaries.GetValueOrDefault(message.MessageID)));
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetThreadsForChannel(string channelId)
+        {
+            var username = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(username))
+                return Unauthorized(new { message = "Missing user identity." });
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == channelId);
+            if (channel == null)
+                return NotFound(new { message = "Channel not found." });
+            if (!await IsServerMember(channel.ServerId, username))
+                return Forbid();
+
+            var threads = await _context.ServerThreads
+                .Where(thread => thread.ChannelId == channelId)
+                .OrderByDescending(thread => thread.LastActivityAt)
+                .ToListAsync();
+            var threadIds = threads.Select(thread => thread.ThreadId).ToList();
+            var parentIds = threads.Select(thread => thread.ParentMessageId).ToList();
+            var messageCounts = await GetThreadMessageCounts(threadIds);
+            var parents = await _context.ServerMessages
+                .Where(message => parentIds.Contains(message.MessageID))
+                .ToDictionaryAsync(message => message.MessageID);
+
+            return Ok(threads.Select(thread => BuildThreadResponse(
+                thread,
+                messageCounts.GetValueOrDefault(thread.ThreadId),
+                parents.GetValueOrDefault(thread.ParentMessageId))));
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("abuse")]
+        public async Task<IActionResult> CreateThread([FromBody] CreateThreadRequest request)
+        {
+            var username = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(username))
+                return Unauthorized(new { message = "Missing user identity." });
+
+            var parentMessageId = request.ParentMessageId?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(parentMessageId))
+                return BadRequest(new { message = "Parent message id is required." });
+
+            var parentMessage = await _context.ServerMessages.FirstOrDefaultAsync(m => m.MessageID == parentMessageId);
+            if (parentMessage == null)
+                return NotFound(new { message = "Parent message not found." });
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == parentMessage.ChannelId);
+            if (channel == null)
+                return NotFound(new { message = "Channel not found." });
+            if (channel.Type != "text")
+                return BadRequest(new { message = "Threads can only be created in text channels." });
+            if (!await IsServerMember(channel.ServerId, username))
+                return Forbid();
+
+            var communicationRestriction = await GetCommunicationRestriction(channel.ServerId, username);
+            if (communicationRestriction != null)
+                return StatusCode(StatusCodes.Status403Forbidden, new { message = communicationRestriction });
+            if (!await CanSendMessages(channel.ServerId, username))
+                return Forbid();
+
+            var verification = await GetServerVerificationResult(channel.ServerId, username);
+            if (!verification.Allowed)
+                return StatusCode(StatusCodes.Status403Forbidden, new
+                {
+                    message = verification.Message,
+                    verificationLevel = verification.Level
+                });
+
+            var existingThread = await _context.ServerThreads
+                .FirstOrDefaultAsync(thread => thread.ParentMessageId == parentMessageId);
+            if (existingThread != null)
+            {
+                var existingCount = await _context.ServerThreadMessages.CountAsync(message =>
+                    message.ThreadId == existingThread.ThreadId);
+                return Ok(BuildThreadResponse(existingThread, existingCount, parentMessage));
+            }
+
+            var threadName = NormalizeThreadName(request.Name);
+            if (threadName == null)
+                return BadRequest(new { message = "Thread name must be 1-120 characters." });
+
+            var now = DateTime.UtcNow;
+            var thread = new ServerThread
+            {
+                ThreadId = string.IsNullOrWhiteSpace(request.ThreadId) ? Guid.NewGuid().ToString() : request.ThreadId.Trim(),
+                ServerId = channel.ServerId,
+                ChannelId = channel.Id,
+                ParentMessageId = parentMessage.MessageID,
+                Name = threadName,
+                CreatedBy = username,
+                CreatedAt = now,
+                LastActivityAt = now
+            };
+
+            if (await _context.ServerThreads.AnyAsync(item => item.ThreadId == thread.ThreadId))
+                return Conflict(new { message = "Duplicate thread id." });
+
+            _context.ServerThreads.Add(thread);
+            await _context.SaveChangesAsync();
+            return Ok(BuildThreadResponse(thread, 0, parentMessage));
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetThread(string threadId)
+        {
+            var username = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(username))
+                return Unauthorized(new { message = "Missing user identity." });
+
+            var access = await GetThreadAccess(threadId, username);
+            if (access.Error != null)
+                return access.Error;
+
+            var thread = access.Thread!;
+            var count = await _context.ServerThreadMessages.CountAsync(message =>
+                message.ThreadId == thread.ThreadId);
+            var parent = await _context.ServerMessages.FirstOrDefaultAsync(message =>
+                message.MessageID == thread.ParentMessageId);
+
+            return Ok(BuildThreadResponse(thread, count, parent));
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetThreadMessages(string threadId, int take = 50)
+        {
+            var username = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(username))
+                return Unauthorized(new { message = "Missing user identity." });
+
+            var access = await GetThreadAccess(threadId, username);
+            if (access.Error != null)
+                return access.Error;
+
+            var thread = access.Thread!;
+            take = Math.Clamp(take, 1, 100);
+            var messages = await _context.ServerThreadMessages
+                .Where(message => message.ThreadId == thread.ThreadId)
+                .ToListAsync();
+
+            return Ok(messages
+                .OrderBy(message => ParseDate(message.Date))
+                .TakeLast(take)
+                .Select(BuildThreadMessageResponse));
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("abuse")]
+        public async Task<IActionResult> SendThreadMessage([FromBody] SendThreadMessageRequest request)
+        {
+            var username = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(username))
+                return Unauthorized(new { message = "Missing user identity." });
+
+            var access = await GetThreadAccess(request.ThreadId, username);
+            if (access.Error != null)
+                return access.Error;
+
+            var channel = access.Channel!;
+            var communicationRestriction = await GetCommunicationRestriction(channel.ServerId, username);
+            if (communicationRestriction != null)
+                return StatusCode(StatusCodes.Status403Forbidden, new { message = communicationRestriction });
+            if (!await CanSendMessages(channel.ServerId, username))
+                return Forbid();
+
+            var verification = await GetServerVerificationResult(channel.ServerId, username);
+            if (!verification.Allowed)
+                return StatusCode(StatusCodes.Status403Forbidden, new
+                {
+                    message = verification.Message,
+                    verificationLevel = verification.Level
+                });
+
+            var text = request.UserText?.Trim() ?? string.Empty;
+            var attachmentUrl = NormalizeOptional(request.AttachmentUrl);
+            if (!IsValidMessageBody(text, attachmentUrl))
+                return BadRequest(new { message = "Message must be 1-4000 characters or include an attachment." });
+            if (!IsValidAttachment(attachmentUrl))
+                return BadRequest(new { message = "Attachment must be blank, an http URL, or an uploaded file URL." });
+
+            var now = DateTime.UtcNow;
+            var threadMessage = new ServerThreadMessage
+            {
+                ThreadMessageId = string.IsNullOrWhiteSpace(request.ThreadMessageId)
+                    ? Guid.NewGuid().ToString()
+                    : request.ThreadMessageId.Trim(),
+                ThreadId = access.Thread!.ThreadId,
+                MessagesUserSender = username,
+                Date = now.ToString("O"),
+                userText = text,
+                AttachmentUrl = attachmentUrl,
+                AttachmentContentType = NormalizeOptional(request.AttachmentContentType)
+            };
+
+            if (await _context.ServerThreadMessages.AnyAsync(message =>
+                    message.ThreadMessageId == threadMessage.ThreadMessageId))
+                return Conflict(new { message = "Duplicate thread message id." });
+
+            access.Thread!.LastActivityAt = now;
+            _context.ServerThreadMessages.Add(threadMessage);
+            await _context.SaveChangesAsync();
+            return Ok(BuildThreadMessageResponse(threadMessage));
         }
 
         [HttpPost]
@@ -381,6 +671,138 @@ namespace DiscordCloneServer.Controllers
             });
 
             return Ok(response);
+        }
+
+        private sealed class ThreadSummaryData
+        {
+            public ServerThread Thread { get; init; } = new();
+            public int MessageCount { get; init; }
+        }
+
+        private sealed class ThreadAccessResult
+        {
+            public ServerThread? Thread { get; init; }
+            public Channel? Channel { get; init; }
+            public IActionResult? Error { get; init; }
+        }
+
+        private async Task<Dictionary<string, ThreadSummaryData>> GetThreadSummariesForParentMessages(IEnumerable<string> parentMessageIds)
+        {
+            var parentIds = parentMessageIds
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct()
+                .ToList();
+            if (parentIds.Count == 0)
+            {
+                return new Dictionary<string, ThreadSummaryData>();
+            }
+
+            var threads = await _context.ServerThreads
+                .Where(thread => parentIds.Contains(thread.ParentMessageId))
+                .ToListAsync();
+            var messageCounts = await GetThreadMessageCounts(threads.Select(thread => thread.ThreadId));
+
+            return threads.ToDictionary(
+                thread => thread.ParentMessageId,
+                thread => new ThreadSummaryData
+                {
+                    Thread = thread,
+                    MessageCount = messageCounts.GetValueOrDefault(thread.ThreadId)
+                });
+        }
+
+        private async Task<Dictionary<string, int>> GetThreadMessageCounts(IEnumerable<string> threadIds)
+        {
+            var ids = threadIds
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct()
+                .ToList();
+            if (ids.Count == 0)
+            {
+                return new Dictionary<string, int>();
+            }
+
+            var matchingMessages = await _context.ServerThreadMessages
+                .Where(message => ids.Contains(message.ThreadId))
+                .ToListAsync();
+
+            return matchingMessages
+                .GroupBy(message => message.ThreadId)
+                .ToDictionary(group => group.Key, group => group.Count());
+        }
+
+        private async Task<ThreadAccessResult> GetThreadAccess(string? threadId, string username)
+        {
+            var normalizedThreadId = threadId?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(normalizedThreadId))
+            {
+                return new ThreadAccessResult
+                {
+                    Error = BadRequest(new { message = "Thread id is required." })
+                };
+            }
+
+            var thread = await _context.ServerThreads.FirstOrDefaultAsync(item => item.ThreadId == normalizedThreadId);
+            if (thread == null)
+            {
+                return new ThreadAccessResult
+                {
+                    Error = NotFound(new { message = "Thread not found." })
+                };
+            }
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(item => item.Id == thread.ChannelId);
+            if (channel == null)
+            {
+                return new ThreadAccessResult
+                {
+                    Error = NotFound(new { message = "Channel not found." })
+                };
+            }
+
+            if (!await IsServerMember(channel.ServerId, username))
+            {
+                return new ThreadAccessResult
+                {
+                    Error = Forbid()
+                };
+            }
+
+            return new ThreadAccessResult
+            {
+                Thread = thread,
+                Channel = channel
+            };
+        }
+
+        private async Task<bool> CanPinMessage(ServerMessage message, Channel channel, string username)
+        {
+            if (string.Equals(message.MessagesUserSender, username, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == channel.ServerId);
+            if (server?.ServerOwner == username)
+            {
+                return true;
+            }
+
+            var member = await _context.ServerMembers.FirstOrDefaultAsync(m =>
+                m.ServerId == channel.ServerId && m.Username == username);
+            if (member == null)
+            {
+                return false;
+            }
+
+            var roleName = member.Role?.Trim().ToLowerInvariant() ?? "user";
+            if (roleName is "owner" or "admin" or "moderator")
+            {
+                return true;
+            }
+
+            var role = await _context.ServerRoles.FirstOrDefaultAsync(r => r.ServerId == channel.ServerId && r.Name == roleName);
+            return role?.CanManageChannels ?? false;
         }
 
         private async Task<bool> IsServerMember(string serverId, string username)
@@ -582,7 +1004,10 @@ namespace DiscordCloneServer.Controllers
             return state;
         }
 
-        private static object BuildMessageResponse(Models.ServerMessage message, IEnumerable<MessageReaction> reactions)
+        private static object BuildMessageResponse(
+            Models.ServerMessage message,
+            IEnumerable<MessageReaction> reactions,
+            ThreadSummaryData? threadSummary = null)
         {
             return new
             {
@@ -595,8 +1020,56 @@ namespace DiscordCloneServer.Controllers
                 message.AttachmentUrl,
                 message.AttachmentContentType,
                 message.EditedAt,
+                message.IsPinned,
+                message.PinnedBy,
+                message.PinnedAt,
+                Thread = threadSummary == null
+                    ? null
+                    : BuildThreadResponse(threadSummary.Thread, threadSummary.MessageCount, message),
+                ThreadMessageCount = threadSummary?.MessageCount ?? 0,
                 Mentions = ExtractMentions(message.userText),
                 Reactions = SummarizeReactions(reactions)
+            };
+        }
+
+        private static object BuildThreadResponse(ServerThread thread, int messageCount = 0, Models.ServerMessage? parentMessage = null)
+        {
+            return new
+            {
+                thread.ThreadId,
+                thread.ServerId,
+                thread.ChannelId,
+                thread.ParentMessageId,
+                thread.Name,
+                thread.CreatedBy,
+                thread.CreatedAt,
+                thread.LastActivityAt,
+                MessageCount = messageCount,
+                ParentPreview = parentMessage == null
+                    ? null
+                    : new
+                    {
+                        parentMessage.MessageID,
+                        parentMessage.MessagesUserSender,
+                        parentMessage.Date,
+                        parentMessage.userText
+                    }
+            };
+        }
+
+        private static object BuildThreadMessageResponse(ServerThreadMessage message)
+        {
+            return new
+            {
+                message.ThreadMessageId,
+                message.ThreadId,
+                message.MessagesUserSender,
+                message.Date,
+                message.userText,
+                message.AttachmentUrl,
+                message.AttachmentContentType,
+                message.EditedAt,
+                Mentions = ExtractMentions(message.userText)
             };
         }
 
@@ -673,6 +1146,17 @@ namespace DiscordCloneServer.Controllers
             var normalized = emoji?.Trim();
             return string.IsNullOrWhiteSpace(normalized) || normalized.Length > 64 ? null : normalized;
         }
+
+        private static string? NormalizeThreadName(string? name)
+        {
+            var normalized = name?.Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return null;
+            }
+
+            return normalized.Length <= 120 ? normalized : normalized[..120];
+        }
     }
 
     public class EditServerMessageRequest
@@ -699,5 +1183,27 @@ namespace DiscordCloneServer.Controllers
         public string ScopeId { get; set; } = string.Empty;
         public string? LastReadMessageId { get; set; }
         public DateTime? LastReadAt { get; set; }
+    }
+
+    public class PinMessageRequest
+    {
+        public string MessageId { get; set; } = string.Empty;
+        public bool IsPinned { get; set; }
+    }
+
+    public class CreateThreadRequest
+    {
+        public string? ThreadId { get; set; }
+        public string ParentMessageId { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+    }
+
+    public class SendThreadMessageRequest
+    {
+        public string? ThreadMessageId { get; set; }
+        public string ThreadId { get; set; } = string.Empty;
+        public string UserText { get; set; } = string.Empty;
+        public string? AttachmentUrl { get; set; }
+        public string? AttachmentContentType { get; set; }
     }
 }
