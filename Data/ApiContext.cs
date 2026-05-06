@@ -22,6 +22,9 @@ namespace DiscordCloneServer.Data
         public DbSet<ServerBan> ServerBans { get; set; }
         public DbSet<ServerInvite> ServerInvites { get; set; }
         public DbSet<MessageReaction> MessageReactions { get; set; }
+        public DbSet<MessagePoll> MessagePolls { get; set; }
+        public DbSet<MessagePollOption> MessagePollOptions { get; set; }
+        public DbSet<MessagePollVote> MessagePollVotes { get; set; }
         public DbSet<UnreadState> UnreadStates { get; set; }
         public DbSet<ContactVerification> ContactVerifications { get; set; }
         public DbSet<ServerAuditLog> ServerAuditLogs { get; set; }
@@ -106,6 +109,20 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<Account>()
                 .Property(a => a.PhoneNumber)
                 .HasMaxLength(32);
+            modelBuilder.Entity<Account>()
+                .Property(a => a.ActivityStatus)
+                .HasMaxLength(120)
+                .HasDefaultValue("");
+            modelBuilder.Entity<Account>()
+                .Property(a => a.AccountStanding)
+                .HasMaxLength(32)
+                .HasDefaultValue("good");
+            modelBuilder.Entity<Account>()
+                .Property(a => a.TrustScore)
+                .HasDefaultValue(60);
+            modelBuilder.Entity<Account>()
+                .Property(a => a.StandingReason)
+                .HasMaxLength(300);
             modelBuilder.Entity<Account>()
                 .Property(a => a.PresenceStatus)
                 .HasMaxLength(32);
@@ -250,6 +267,45 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<MessageReaction>().ToTable("Message_Reactions");
             modelBuilder.Entity<MessageReaction>()
                 .HasIndex(reaction => new { reaction.ScopeType, reaction.MessageId, reaction.Emoji, reaction.Username })
+                .IsUnique();
+            modelBuilder.Entity<MessagePoll>().ToTable("Message_Polls");
+            modelBuilder.Entity<MessagePoll>()
+                .Property(poll => poll.ScopeType)
+                .HasMaxLength(32);
+            modelBuilder.Entity<MessagePoll>()
+                .Property(poll => poll.MessageId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<MessagePoll>()
+                .Property(poll => poll.CreatedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<MessagePoll>()
+                .Property(poll => poll.Question)
+                .HasMaxLength(280);
+            modelBuilder.Entity<MessagePoll>()
+                .HasIndex(poll => new { poll.ScopeType, poll.MessageId })
+                .IsUnique();
+            modelBuilder.Entity<MessagePollOption>().ToTable("Message_Poll_Options");
+            modelBuilder.Entity<MessagePollOption>()
+                .Property(option => option.PollId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<MessagePollOption>()
+                .Property(option => option.Text)
+                .HasMaxLength(100);
+            modelBuilder.Entity<MessagePollOption>()
+                .HasIndex(option => new { option.PollId, option.Position })
+                .IsUnique();
+            modelBuilder.Entity<MessagePollVote>().ToTable("Message_Poll_Votes");
+            modelBuilder.Entity<MessagePollVote>()
+                .Property(vote => vote.PollId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<MessagePollVote>()
+                .Property(vote => vote.OptionId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<MessagePollVote>()
+                .Property(vote => vote.Username)
+                .HasMaxLength(256);
+            modelBuilder.Entity<MessagePollVote>()
+                .HasIndex(vote => new { vote.PollId, vote.OptionId, vote.Username })
                 .IsUnique();
             modelBuilder.Entity<UnreadState>().ToTable("Unread_States");
             modelBuilder.Entity<UnreadState>()

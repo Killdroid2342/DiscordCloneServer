@@ -4,6 +4,7 @@ using DiscordCloneServer.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace DiscordCloneServer.Migrations
 {
     [DbContext(typeof(ApiContext))]
-    partial class ApiContextModelSnapshot : ModelSnapshot
+    [Migration("20260506124027_AddMessagePolls")]
+    partial class AddMessagePolls
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -108,20 +111,6 @@ namespace DiscordCloneServer.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("AccountStanding")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(32)
-                        .HasColumnType("nvarchar(32)")
-                        .HasDefaultValue("good");
-
-                    b.Property<string>("ActivityStatus")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(120)
-                        .HasColumnType("nvarchar(120)")
-                        .HasDefaultValue("");
-
                     b.Property<string>("AuthenticatorSecretProtected")
                         .HasColumnType("nvarchar(max)");
 
@@ -155,9 +144,6 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<bool>("IsDisabled")
                         .HasColumnType("bit");
-
-                    b.Property<DateTime?>("LastActiveAt")
-                        .HasColumnType("datetime2");
 
                     b.Property<string>("OutgoingFriendRequests")
                         .HasColumnType("nvarchar(max)");
@@ -218,20 +204,8 @@ namespace DiscordCloneServer.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<string>("StandingReason")
-                        .HasMaxLength(300)
-                        .HasColumnType("nvarchar(300)");
-
-                    b.Property<DateTime?>("StandingUpdatedAt")
-                        .HasColumnType("datetime2");
-
                     b.Property<string>("TextColor")
                         .HasColumnType("nvarchar(max)");
-
-                    b.Property<int>("TrustScore")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int")
-                        .HasDefaultValue(60);
 
                     b.Property<string>("TwoFactorBackupCodeHashes")
                         .HasColumnType("nvarchar(max)");
