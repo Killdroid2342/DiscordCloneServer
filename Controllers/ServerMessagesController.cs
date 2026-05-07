@@ -57,11 +57,14 @@ namespace DiscordCloneServer.Controllers
             if (channel.Type != "text")
                 return BadRequest(new { message = "Messages can only be sent to text channels." });
 
+            if (!await CanViewChannel(channel, username))
+                return Forbid();
+
             var communicationRestriction = await GetCommunicationRestriction(channel.ServerId, username);
             if (communicationRestriction != null)
                 return StatusCode(StatusCodes.Status403Forbidden, new { message = communicationRestriction });
 
-            if (!await CanSendMessages(channel.ServerId, username))
+            if (!await CanSendMessages(channel, username))
                 return Forbid();
 
             var verification = await GetServerVerificationResult(channel.ServerId, username);
@@ -114,7 +117,11 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetServerMessages(string channelId, int take = 50, string? beforeMessageId = null)
+        public async Task<IActionResult> GetServerMessages(
+            string channelId,
+            int take = 50,
+            string? beforeMessageId = null,
+            bool includePageInfo = false)
         {
             try
             {
@@ -127,6 +134,8 @@ namespace DiscordCloneServer.Controllers
                     return NotFound(new { message = "Channel not found." });
 
                 if (!await IsServerMember(channel.ServerId, username))
+                    return Forbid();
+                if (!await CanViewChannel(channel, username))
                     return Forbid();
 
                 take = Math.Clamp(take, 1, 100);
@@ -143,16 +152,19 @@ namespace DiscordCloneServer.Controllers
                     })
                     .ToList();
 
+                var totalCount = orderedMessages.Count;
+                var boundaryCount = orderedMessages.Count;
                 if (!string.IsNullOrWhiteSpace(beforeMessageId))
                 {
                     var beforeIndex = orderedMessages.FindIndex(message => message.MessageID == beforeMessageId);
                     if (beforeIndex >= 0)
                     {
-                        orderedMessages = orderedMessages.Take(beforeIndex).ToList();
+                        boundaryCount = beforeIndex;
                     }
                 }
 
-                var page = orderedMessages.TakeLast(take).ToList();
+                var pageWindow = orderedMessages.Take(boundaryCount).ToList();
+                var page = pageWindow.TakeLast(take).ToList();
                 var messageIds = page.Select(message => message.MessageID).ToList();
                 var reactions = await _context.MessageReactions
                     .Where(reaction => reaction.ScopeType == "server" && messageIds.Contains(reaction.MessageId))
@@ -166,12 +178,28 @@ namespace DiscordCloneServer.Controllers
                     username,
                     HttpContext.RequestAborted);
 
-                return Ok(page.Select(message => BuildMessageResponse(
+                var responseMessages = page.Select(message => BuildMessageResponse(
                     message,
                     reactions.Where(reaction => reaction.MessageId == message.MessageID),
                     threadSummaries.GetValueOrDefault(message.MessageID),
                     GetServerReplyPreview(message, replyPreviews),
-                    pollLookup.GetValueOrDefault(message.MessageID))));
+                    pollLookup.GetValueOrDefault(message.MessageID))).ToList();
+
+                if (!includePageInfo)
+                {
+                    return Ok(responseMessages);
+                }
+
+                return Ok(new
+                {
+                    messages = responseMessages,
+                    hasMore = boundaryCount > page.Count,
+                    nextBeforeMessageId = page.FirstOrDefault()?.MessageID,
+                    beforeMessageId,
+                    pageSize = take,
+                    returnedCount = page.Count,
+                    totalCount
+                });
             }
             catch (Exception ex)
             {
@@ -191,6 +219,10 @@ namespace DiscordCloneServer.Controllers
             if (message == null)
                 return NotFound(new { message = "Message not found." });
             if (message.MessagesUserSender != username)
+                return Forbid();
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == message.ChannelId);
+            if (channel == null || !await CanViewChannel(channel, username))
                 return Forbid();
 
             var nextText = request.UserText?.Trim() ?? string.Empty;
@@ -237,6 +269,9 @@ namespace DiscordCloneServer.Controllers
                 member.Username == username &&
                 member.Role == "owner");
 
+            if (channel == null || !await CanViewChannel(channel, username))
+                return Forbid();
+
             if (message.MessagesUserSender != username && !canManage)
                 return Forbid();
 
@@ -269,7 +304,12 @@ namespace DiscordCloneServer.Controllers
             string query = "",
             string? fromUser = null,
             string? mentions = null,
+            string? after = null,
+            string? before = null,
             bool? hasAttachment = null,
+            string? attachmentType = null,
+            bool? hasLink = null,
+            bool? pinned = null,
             int take = 50)
         {
             var username = User.GetUsername();
@@ -281,10 +321,14 @@ namespace DiscordCloneServer.Controllers
                 return NotFound(new { message = "Channel not found." });
             if (!await IsServerMember(channel.ServerId, username))
                 return Forbid();
+            if (!await CanViewChannel(channel, username))
+                return Forbid();
 
             query = query?.Trim() ?? string.Empty;
             fromUser = fromUser?.Trim();
-            mentions = mentions?.Trim();
+            mentions = NormalizeMentionFilter(mentions);
+            var afterDate = ParseSearchBoundary(after, endOfDay: false);
+            var beforeDate = ParseSearchBoundary(before, endOfDay: true);
             take = Math.Clamp(take, 1, 100);
 
             var messages = await _context.ServerMessages
@@ -293,13 +337,24 @@ namespace DiscordCloneServer.Controllers
 
             var filtered = messages
                 .Where(message => query == string.Empty ||
-                                  message.userText.Contains(query, StringComparison.OrdinalIgnoreCase))
+                                  message.userText.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                                  message.MessagesUserSender.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                                  (message.SenderDisplayName?.Contains(query, StringComparison.OrdinalIgnoreCase) == true))
                 .Where(message => string.IsNullOrWhiteSpace(fromUser) ||
                                   string.Equals(message.MessagesUserSender, fromUser, StringComparison.OrdinalIgnoreCase))
                 .Where(message => string.IsNullOrWhiteSpace(mentions) ||
                                   ExtractMentions(message.userText).Contains(mentions, StringComparer.OrdinalIgnoreCase))
+                .Where(message => afterDate == null || ParseDate(message.Date) >= afterDate.Value)
+                .Where(message => beforeDate == null || ParseDate(message.Date) <= beforeDate.Value)
                 .Where(message => hasAttachment == null ||
                                   (!string.IsNullOrWhiteSpace(message.AttachmentUrl) == hasAttachment.Value))
+                .Where(message => MatchesAttachmentType(
+                    message.AttachmentContentType,
+                    message.AttachmentUrl,
+                    attachmentType))
+                .Where(message => hasLink == null ||
+                                  ContainsLink(message.userText) == hasLink.Value)
+                .Where(message => pinned == null || message.IsPinned == pinned.Value)
                 .OrderByDescending(message => ParseDate(message.Date))
                 .Take(take)
                 .ToList();
@@ -335,6 +390,8 @@ namespace DiscordCloneServer.Controllers
             if (channel == null)
                 return NotFound(new { message = "Channel not found." });
             if (!await IsServerMember(channel.ServerId, username))
+                return Forbid();
+            if (!await CanViewChannel(channel, username))
                 return Forbid();
 
             var pinnedMessages = await _context.ServerMessages
@@ -379,6 +436,8 @@ namespace DiscordCloneServer.Controllers
 
             var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == message.ChannelId);
             if (channel == null || !await IsServerMember(channel.ServerId, username))
+                return Forbid();
+            if (!await CanViewChannel(channel, username))
                 return Forbid();
 
             if (!await CanPinMessage(message, channel, username))
@@ -426,6 +485,8 @@ namespace DiscordCloneServer.Controllers
                 return NotFound(new { message = "Channel not found." });
             if (!await IsServerMember(channel.ServerId, username))
                 return Forbid();
+            if (!await CanViewChannel(channel, username))
+                return Forbid();
 
             var threads = await _context.ServerThreads
                 .Where(thread => thread.ChannelId == channelId)
@@ -467,11 +528,13 @@ namespace DiscordCloneServer.Controllers
                 return BadRequest(new { message = "Threads can only be created in text channels." });
             if (!await IsServerMember(channel.ServerId, username))
                 return Forbid();
+            if (!await CanViewChannel(channel, username))
+                return Forbid();
 
             var communicationRestriction = await GetCommunicationRestriction(channel.ServerId, username);
             if (communicationRestriction != null)
                 return StatusCode(StatusCodes.Status403Forbidden, new { message = communicationRestriction });
-            if (!await CanSendMessages(channel.ServerId, username))
+            if (!await CanSendMessages(channel, username))
                 return Forbid();
 
             var verification = await GetServerVerificationResult(channel.ServerId, username);
@@ -537,7 +600,11 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetThreadMessages(string threadId, int take = 50)
+        public async Task<IActionResult> GetThreadMessages(
+            string threadId,
+            int take = 50,
+            string? beforeMessageId = null,
+            bool includePageInfo = false)
         {
             var username = User.GetUsername();
             if (string.IsNullOrWhiteSpace(username))
@@ -553,10 +620,38 @@ namespace DiscordCloneServer.Controllers
                 .Where(message => message.ThreadId == thread.ThreadId)
                 .ToListAsync();
 
-            return Ok(messages
+            var orderedMessages = messages
                 .OrderBy(message => ParseDate(message.Date))
-                .TakeLast(take)
-                .Select(BuildThreadMessageResponse));
+                .ToList();
+            var totalCount = orderedMessages.Count;
+            var boundaryCount = orderedMessages.Count;
+
+            if (!string.IsNullOrWhiteSpace(beforeMessageId))
+            {
+                var beforeIndex = orderedMessages.FindIndex(message => message.ThreadMessageId == beforeMessageId);
+                if (beforeIndex >= 0)
+                {
+                    boundaryCount = beforeIndex;
+                }
+            }
+
+            var page = orderedMessages.Take(boundaryCount).TakeLast(take).ToList();
+            var responseMessages = page.Select(BuildThreadMessageResponse).ToList();
+            if (!includePageInfo)
+            {
+                return Ok(responseMessages);
+            }
+
+            return Ok(new
+            {
+                messages = responseMessages,
+                hasMore = boundaryCount > page.Count,
+                nextBeforeMessageId = page.FirstOrDefault()?.ThreadMessageId,
+                beforeMessageId,
+                pageSize = take,
+                returnedCount = page.Count,
+                totalCount
+            });
         }
 
         [HttpPost]
@@ -575,7 +670,7 @@ namespace DiscordCloneServer.Controllers
             var communicationRestriction = await GetCommunicationRestriction(channel.ServerId, username);
             if (communicationRestriction != null)
                 return StatusCode(StatusCodes.Status403Forbidden, new { message = communicationRestriction });
-            if (!await CanSendMessages(channel.ServerId, username))
+            if (!await CanSendMessages(channel, username))
                 return Forbid();
 
             var verification = await GetServerVerificationResult(channel.ServerId, username);
@@ -631,6 +726,8 @@ namespace DiscordCloneServer.Controllers
 
             var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == message.ChannelId);
             if (channel == null || !await IsServerMember(channel.ServerId, username))
+                return Forbid();
+            if (!await CanViewChannel(channel, username))
                 return Forbid();
 
             var communicationRestriction = await GetCommunicationRestriction(channel.ServerId, username);
@@ -698,6 +795,8 @@ namespace DiscordCloneServer.Controllers
                 return NotFound(new { message = "Channel not found." });
             if (!await IsServerMember(channel.ServerId, username))
                 return Forbid();
+            if (!await CanViewChannel(channel, username))
+                return Forbid();
 
             var state = await GetOrCreateUnreadState(username, "server-channel", request.ScopeId);
             state.LastReadMessageId = NormalizeOptional(request.LastReadMessageId);
@@ -719,14 +818,22 @@ namespace DiscordCloneServer.Controllers
             var channels = await _context.Channels
                 .Where(channel => channel.ServerId == serverId)
                 .ToListAsync();
-            var channelIds = channels.Select(channel => channel.Id).ToList();
+            var visibleChannels = new List<Channel>();
+            foreach (var channel in channels)
+            {
+                if (await CanViewChannel(channel, username))
+                {
+                    visibleChannels.Add(channel);
+                }
+            }
+            var channelIds = visibleChannels.Select(channel => channel.Id).ToList();
             var states = await _context.UnreadStates
                 .Where(state => state.Username == username &&
                                 state.ScopeType == "server-channel" &&
                                 channelIds.Contains(state.ScopeId))
                 .ToListAsync();
 
-            var response = channels.Select(channel =>
+            var response = visibleChannels.Select(channel =>
             {
                 var state = states.FirstOrDefault(s => s.ScopeId == channel.Id);
                 var lastRead = state?.LastReadAt ?? DateTime.MinValue;
@@ -877,6 +984,14 @@ namespace DiscordCloneServer.Controllers
                 };
             }
 
+            if (!await CanViewChannel(channel, username))
+            {
+                return new ThreadAccessResult
+                {
+                    Error = Forbid()
+                };
+            }
+
             return new ThreadAccessResult
             {
                 Thread = thread,
@@ -918,6 +1033,36 @@ namespace DiscordCloneServer.Controllers
         {
             return await _context.ServerMembers.AnyAsync(member =>
                 member.ServerId == serverId && member.Username == username);
+        }
+
+        private async Task<(CreateServer? Server, ServerMember? Member, ServerRole? Role)> GetChannelPermissionContext(
+            string serverId,
+            string username)
+        {
+            var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == serverId);
+            var member = await _context.ServerMembers.FirstOrDefaultAsync(m =>
+                m.ServerId == serverId && m.Username == username);
+            ServerRole? role = null;
+            if (member != null)
+            {
+                var roleName = ChannelPermissionPolicy.NormalizeRoleName(member.Role);
+                role = await _context.ServerRoles.FirstOrDefaultAsync(r =>
+                    r.ServerId == serverId && r.Name == roleName);
+            }
+
+            return (server, member, role);
+        }
+
+        private async Task<bool> CanViewChannel(Channel channel, string username)
+        {
+            var (server, member, role) = await GetChannelPermissionContext(channel.ServerId, username);
+            return ChannelPermissionPolicy.CanViewChannel(channel, server, member, role, username);
+        }
+
+        private async Task<bool> CanSendMessages(Channel channel, string username)
+        {
+            var (server, member, role) = await GetChannelPermissionContext(channel.ServerId, username);
+            return ChannelPermissionPolicy.CanSendMessages(channel, server, member, role, username);
         }
 
         private async Task<bool> CanSendMessages(string serverId, string username)
@@ -1134,6 +1279,12 @@ namespace DiscordCloneServer.Controllers
                 message.IsPinned,
                 message.PinnedBy,
                 message.PinnedAt,
+                message.IsBot,
+                message.BotAccountId,
+                message.IsWebhook,
+                message.WebhookId,
+                message.SenderDisplayName,
+                message.SenderAvatarUrl,
                 ReplyPreview = BuildServerReplyPreview(replyPreview),
                 Thread = threadSummary == null
                     ? null
@@ -1158,6 +1309,12 @@ namespace DiscordCloneServer.Controllers
                 Sender = message.MessagesUserSender,
                 Date = message.Date,
                 Text = message.userText,
+                message.IsBot,
+                message.BotAccountId,
+                message.IsWebhook,
+                message.WebhookId,
+                message.SenderDisplayName,
+                message.SenderAvatarUrl,
                 message.AttachmentUrl,
                 message.AttachmentContentType
             };
@@ -1242,6 +1399,65 @@ namespace DiscordCloneServer.Controllers
         private static DateTime ParseDate(string? date)
         {
             return DateTime.TryParse(date, out var dt) ? dt : DateTime.MinValue;
+        }
+
+        private static DateTime? ParseSearchBoundary(string? value, bool endOfDay)
+        {
+            if (string.IsNullOrWhiteSpace(value) || !DateTime.TryParse(value, out var parsed))
+            {
+                return null;
+            }
+
+            var trimmed = value.Trim();
+            var hasTime = trimmed.Contains(':') || trimmed.Contains("T", StringComparison.OrdinalIgnoreCase);
+            if (endOfDay && !hasTime)
+            {
+                return parsed.Date.AddDays(1).AddTicks(-1);
+            }
+
+            return parsed;
+        }
+
+        private static string NormalizeMentionFilter(string? value)
+        {
+            return value?.Trim().TrimStart('@') ?? string.Empty;
+        }
+
+        private static bool ContainsLink(string? text)
+        {
+            return !string.IsNullOrWhiteSpace(text) &&
+                   System.Text.RegularExpressions.Regex.IsMatch(
+                       text,
+                       @"(?:https?://|www\.)\S+",
+                       System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+
+        private static bool MatchesAttachmentType(string? contentType, string? attachmentUrl, string? attachmentType)
+        {
+            var normalized = attachmentType?.Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(normalized) || normalized == "any")
+            {
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(attachmentUrl))
+            {
+                return false;
+            }
+
+            var mediaType = contentType?.Trim().ToLowerInvariant() ?? string.Empty;
+            var isImage = mediaType.StartsWith("image/", StringComparison.Ordinal);
+            var isVideo = mediaType.StartsWith("video/", StringComparison.Ordinal);
+            var isAudio = mediaType.StartsWith("audio/", StringComparison.Ordinal);
+
+            return normalized switch
+            {
+                "image" => isImage,
+                "video" => isVideo,
+                "audio" => isAudio,
+                "file" => !isImage && !isVideo && !isAudio,
+                _ => true
+            };
         }
 
         private static bool IsValidMessageBody(string? message, string? attachmentUrl, bool hasPoll = false)
