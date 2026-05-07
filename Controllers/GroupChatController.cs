@@ -114,7 +114,11 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetGroupMessages(Guid groupId, int take = 50, Guid? beforeMessageId = null)
+        public async Task<IActionResult> GetGroupMessages(
+            Guid groupId,
+            int take = 50,
+            Guid? beforeMessageId = null,
+            bool includePageInfo = false)
         {
             var currentUsername = User.GetUsername();
             if (string.IsNullOrWhiteSpace(currentUsername))
@@ -140,16 +144,19 @@ namespace DiscordCloneServer.Controllers
                 })
                 .ToList();
 
+            var totalCount = orderedMessages.Count;
+            var boundaryCount = orderedMessages.Count;
             if (beforeMessageId.HasValue)
             {
                 var beforeIndex = orderedMessages.FindIndex(message => message.Id == beforeMessageId.Value);
                 if (beforeIndex >= 0)
                 {
-                    orderedMessages = orderedMessages.Take(beforeIndex).ToList();
+                    boundaryCount = beforeIndex;
                 }
             }
 
-            var page = orderedMessages.TakeLast(take).ToList();
+            var pageWindow = orderedMessages.Take(boundaryCount).ToList();
+            var page = pageWindow.TakeLast(take).ToList();
             var messageIds = page.Select(message => message.Id.ToString()).ToList();
             var reactions = await _context.MessageReactions
                 .Where(reaction => reaction.ScopeType == "group" && messageIds.Contains(reaction.MessageId))
@@ -162,7 +169,94 @@ namespace DiscordCloneServer.Controllers
                 currentUsername,
                 HttpContext.RequestAborted);
 
-            return Ok(page.Select(message => BuildGroupMessageResponse(
+            var responseMessages = page.Select(message => BuildGroupMessageResponse(
+                message,
+                reactions.Where(reaction => reaction.MessageId == message.Id.ToString()),
+                GetGroupReplyPreview(message, replyPreviews),
+                pollLookup.GetValueOrDefault(message.Id.ToString()))).ToList();
+
+            if (!includePageInfo)
+            {
+                return Ok(responseMessages);
+            }
+
+            return Ok(new
+            {
+                messages = responseMessages,
+                hasMore = boundaryCount > page.Count,
+                nextBeforeMessageId = page.FirstOrDefault()?.Id,
+                beforeMessageId,
+                pageSize = take,
+                returnedCount = page.Count,
+                totalCount
+            });
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> SearchGroupMessages(
+            Guid groupId,
+            string query = "",
+            string? fromUser = null,
+            string? mentions = null,
+            string? after = null,
+            string? before = null,
+            bool? hasAttachment = null,
+            string? attachmentType = null,
+            bool? hasLink = null,
+            int take = 50)
+        {
+            var currentUsername = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(currentUsername))
+                return Unauthorized(new { message = "Missing user identity." });
+            if (!await IsGroupMember(groupId, currentUsername))
+                return Forbid();
+
+            query = query?.Trim() ?? string.Empty;
+            fromUser = fromUser?.Trim();
+            mentions = NormalizeMentionFilter(mentions);
+            var afterDate = ParseSearchBoundary(after, endOfDay: false);
+            var beforeDate = ParseSearchBoundary(before, endOfDay: true);
+            take = Math.Clamp(take, 1, 100);
+
+            var messages = await _context.GroupMessages
+                .Where(message => message.GroupId == groupId)
+                .ToListAsync();
+
+            var filtered = messages
+                .Where(message => query == string.Empty ||
+                                  message.Content.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                                  message.Sender.Contains(query, StringComparison.OrdinalIgnoreCase))
+                .Where(message => string.IsNullOrWhiteSpace(fromUser) ||
+                                  string.Equals(message.Sender, fromUser, StringComparison.OrdinalIgnoreCase))
+                .Where(message => string.IsNullOrWhiteSpace(mentions) ||
+                                  ExtractMentions(message.Content).Contains(mentions, StringComparer.OrdinalIgnoreCase))
+                .Where(message => afterDate == null || ParseDate(message.Date) >= afterDate.Value)
+                .Where(message => beforeDate == null || ParseDate(message.Date) <= beforeDate.Value)
+                .Where(message => hasAttachment == null ||
+                                  (!string.IsNullOrWhiteSpace(message.AttachmentUrl) == hasAttachment.Value))
+                .Where(message => MatchesAttachmentType(
+                    message.AttachmentContentType,
+                    message.AttachmentUrl,
+                    attachmentType))
+                .Where(message => hasLink == null ||
+                                  ContainsLink(message.Content) == hasLink.Value)
+                .OrderByDescending(message => ParseDate(message.Date))
+                .Take(take)
+                .ToList();
+
+            var messageIds = filtered.Select(message => message.Id.ToString()).ToList();
+            var reactions = await _context.MessageReactions
+                .Where(reaction => reaction.ScopeType == "group" && messageIds.Contains(reaction.MessageId))
+                .ToListAsync();
+            var replyPreviews = GetGroupReplyPreviewLookup(filtered, messages);
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "group",
+                messageIds,
+                currentUsername,
+                HttpContext.RequestAborted);
+
+            return Ok(filtered.Select(message => BuildGroupMessageResponse(
                 message,
                 reactions.Where(reaction => reaction.MessageId == message.Id.ToString()),
                 GetGroupReplyPreview(message, replyPreviews),
@@ -421,47 +515,6 @@ namespace DiscordCloneServer.Controllers
             _context.GroupMessages.Remove(message);
             await _context.SaveChangesAsync();
             return Ok(new { message = "Message deleted." });
-        }
-
-        [HttpGet]
-        public async Task<IActionResult> SearchGroupMessages(Guid groupId, string query = "", string? fromUser = null, bool? hasAttachment = null, int take = 50)
-        {
-            var currentUsername = User.GetUsername();
-            if (string.IsNullOrWhiteSpace(currentUsername))
-                return Unauthorized(new { message = "Missing user identity." });
-            if (!await IsGroupMember(groupId, currentUsername))
-                return Forbid();
-
-            query = query?.Trim() ?? string.Empty;
-            fromUser = fromUser?.Trim();
-            take = Math.Clamp(take, 1, 100);
-
-            var messages = await _context.GroupMessages.Where(m => m.GroupId == groupId).ToListAsync();
-            var filtered = messages
-                .Where(message => query == string.Empty || message.Content.Contains(query, StringComparison.OrdinalIgnoreCase))
-                .Where(message => string.IsNullOrWhiteSpace(fromUser) || string.Equals(message.Sender, fromUser, StringComparison.OrdinalIgnoreCase))
-                .Where(message => hasAttachment == null || (!string.IsNullOrWhiteSpace(message.AttachmentUrl) == hasAttachment.Value))
-                .OrderByDescending(message => ParseDate(message.Date))
-                .Take(take)
-                .ToList();
-
-            var messageIds = filtered.Select(message => message.Id.ToString()).ToList();
-            var reactions = await _context.MessageReactions
-                .Where(reaction => reaction.ScopeType == "group" && messageIds.Contains(reaction.MessageId))
-                .ToListAsync();
-            var replyPreviews = GetGroupReplyPreviewLookup(filtered, messages);
-            var pollLookup = await MessagePollService.GetPollLookupAsync(
-                _context,
-                "group",
-                messageIds,
-                currentUsername,
-                HttpContext.RequestAborted);
-
-            return Ok(filtered.Select(message => BuildGroupMessageResponse(
-                message,
-                reactions.Where(reaction => reaction.MessageId == message.Id.ToString()),
-                GetGroupReplyPreview(message, replyPreviews),
-                pollLookup.GetValueOrDefault(message.Id.ToString()))));
         }
 
         [HttpPost]
@@ -1052,6 +1105,65 @@ namespace DiscordCloneServer.Controllers
         private static DateTime ParseDate(string? date)
         {
             return DateTime.TryParse(date, out var dt) ? dt : DateTime.MinValue;
+        }
+
+        private static DateTime? ParseSearchBoundary(string? value, bool endOfDay)
+        {
+            if (string.IsNullOrWhiteSpace(value) || !DateTime.TryParse(value, out var parsed))
+            {
+                return null;
+            }
+
+            var trimmed = value.Trim();
+            var hasTime = trimmed.Contains(':') || trimmed.Contains("T", StringComparison.OrdinalIgnoreCase);
+            if (endOfDay && !hasTime)
+            {
+                return parsed.Date.AddDays(1).AddTicks(-1);
+            }
+
+            return parsed;
+        }
+
+        private static string NormalizeMentionFilter(string? value)
+        {
+            return value?.Trim().TrimStart('@') ?? string.Empty;
+        }
+
+        private static bool ContainsLink(string? text)
+        {
+            return !string.IsNullOrWhiteSpace(text) &&
+                   System.Text.RegularExpressions.Regex.IsMatch(
+                       text,
+                       @"(?:https?://|www\.)\S+",
+                       System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+
+        private static bool MatchesAttachmentType(string? contentType, string? attachmentUrl, string? attachmentType)
+        {
+            var normalized = attachmentType?.Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(normalized) || normalized == "any")
+            {
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(attachmentUrl))
+            {
+                return false;
+            }
+
+            var mediaType = contentType?.Trim().ToLowerInvariant() ?? string.Empty;
+            var isImage = mediaType.StartsWith("image/", StringComparison.Ordinal);
+            var isVideo = mediaType.StartsWith("video/", StringComparison.Ordinal);
+            var isAudio = mediaType.StartsWith("audio/", StringComparison.Ordinal);
+
+            return normalized switch
+            {
+                "image" => isImage,
+                "video" => isVideo,
+                "audio" => isAudio,
+                "file" => !isImage && !isVideo && !isAudio,
+                _ => true
+            };
         }
 
         private static string[] ExtractMentions(string? text)
