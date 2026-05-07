@@ -1020,6 +1020,287 @@ namespace DiscordCloneServer.Controllers
             return Ok(BuildAccountSettingsResponse(account));
         }
 
+        [HttpGet]
+        public async Task<IActionResult> ExportUserData()
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            var username = account.UserName;
+            var sessions = await _context.AccountSessions
+                .Where(session => session.AccountId == account.Id || session.Username == username)
+                .OrderByDescending(session => session.LastSeenAt)
+                .ToListAsync();
+            var directMessages = await _context.PrivateMessageFriends
+                .Where(message => message.MessagesUserSender == username || message.MessageUserReciver == username)
+                .ToListAsync();
+            var groupChats = (await _context.GroupChats.ToListAsync())
+                .Where(group => ContainsValue(group.Members, username))
+                .OrderBy(group => group.Name)
+                .ToList();
+            var groupIds = groupChats.Select(group => group.Id).ToList();
+            var groupMessages = await _context.GroupMessages
+                .Where(message => groupIds.Contains(message.GroupId))
+                .ToListAsync();
+            var memberships = await _context.ServerMembers
+                .Where(member => member.Username == username)
+                .OrderBy(member => member.ServerId)
+                .ToListAsync();
+            var ownedServers = await _context.CreateServers
+                .Where(server => server.ServerOwner == username)
+                .OrderBy(server => server.ServerName)
+                .ToListAsync();
+            var serverIds = memberships
+                .Select(member => member.ServerId)
+                .Concat(ownedServers.Select(server => server.ServerID ?? string.Empty))
+                .Where(serverId => !string.IsNullOrWhiteSpace(serverId))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var memberServers = await _context.CreateServers
+                .Where(server => server.ServerID != null && serverIds.Contains(server.ServerID))
+                .OrderBy(server => server.ServerName)
+                .ToListAsync();
+            var authoredServerMessages = await _context.ServerMessages
+                .Where(message => message.MessagesUserSender == username)
+                .ToListAsync();
+            var authoredThreadMessages = await _context.ServerThreadMessages
+                .Where(message => message.MessagesUserSender == username)
+                .ToListAsync();
+            var authoredReports = await _context.UserReports
+                .Where(report => report.ReportedByUsername == username || report.TargetUsername == username)
+                .OrderByDescending(report => report.CreatedAt)
+                .ToListAsync();
+            var oauthApplications = await _context.OAuthApplications
+                .Where(application => application.OwnerUsername == username)
+                .OrderBy(application => application.Name)
+                .ToListAsync();
+            var oauthAuthorizations = await _context.OAuthAppAuthorizations
+                .Where(authorization => authorization.Username == username)
+                .OrderByDescending(authorization => authorization.CreatedAt)
+                .ToListAsync();
+            var oauthTokens = await _context.OAuthAccessTokens
+                .Where(token => token.Username == username)
+                .OrderByDescending(token => token.CreatedAt)
+                .ToListAsync();
+
+            var exportedAt = DateTime.UtcNow;
+            var export = new
+            {
+                exportVersion = 1,
+                exportedAt,
+                account = new
+                {
+                    account.Id,
+                    username = account.UserName,
+                    account.CreatedAt,
+                    account.BackgroundColor,
+                    account.TextColor,
+                    account.ProfilePictureUrl,
+                    account.ProfileBannerUrl,
+                    account.ProfileBannerColor,
+                    bio = account.Description,
+                    account.Email,
+                    account.PhoneNumber,
+                    account.EmailVerifiedAt,
+                    account.PhoneNumberVerifiedAt,
+                    presenceStatus = NormalizePresenceStatus(account.PresenceStatus) ?? "online",
+                    customStatus = GetCustomStatus(account),
+                    activityStatus = NormalizeActivityStatus(account.ActivityStatus) ?? string.Empty,
+                    account.LastActiveAt,
+                    accountStanding = BuildAccountStandingResponse(account),
+                    privacy = new
+                    {
+                        dmPolicy = NormalizeDmPolicy(account.PrivacyDmPolicy) ?? "friends",
+                        account.PrivacyAllowFriendRequestsEveryone,
+                        account.PrivacyAllowFriendRequestsFriendsOfFriends,
+                        account.PrivacyAllowFriendRequestsServerMembers,
+                        account.PrivacyShowActivity
+                    },
+                    friends = account.Friends ?? Array.Empty<string>(),
+                    incomingFriendRequests = account.IncomingFriendRequests ?? Array.Empty<string>(),
+                    outgoingFriendRequests = account.OutgoingFriendRequests ?? Array.Empty<string>(),
+                    groups = account.Groups ?? Array.Empty<string>(),
+                    blockedUsers = account.BlockedUsers ?? Array.Empty<string>(),
+                    profileBadges = GetProfileBadges(account),
+                    settings = ParseExportJson(account.SettingsJson),
+                    voiceChangerSettings = ParseExportJson(account.VoiceChangerSettingsJson),
+                    security = new
+                    {
+                        account.PasswordUpdatedAt,
+                        account.IsDisabled,
+                        account.TwoFactorEnabled,
+                        backupCodesRemaining = account.TwoFactorBackupCodeHashes?.Length ?? 0
+                    }
+                },
+                sessions = sessions.Select(session => new
+                {
+                    session.Id,
+                    session.CreatedAt,
+                    session.ExpiresAt,
+                    session.LastSeenAt,
+                    session.RevokedAt,
+                    session.ReplacedBySessionId,
+                    session.UserAgent,
+                    session.IpAddress,
+                    isActive = session.RevokedAt == null && session.ExpiresAt > exportedAt
+                }),
+                directMessages = directMessages
+                    .OrderBy(message => ParseExportDate(message.Date))
+                    .Select(message => new
+                    {
+                        message.PrivateMessageID,
+                        message.MessagesUserSender,
+                        message.MessageUserReciver,
+                        message.Date,
+                        message.FriendMessagesData,
+                        message.ReplyToMessageId,
+                        message.AttachmentUrl,
+                        message.AttachmentContentType,
+                        message.EditedAt
+                    }),
+                groupChats = groupChats.Select(group => new
+                {
+                    group.Id,
+                    group.Name,
+                    group.Owner,
+                    members = group.Members ?? Array.Empty<string>(),
+                    group.AvatarUrl
+                }),
+                groupMessages = groupMessages
+                    .OrderBy(message => ParseExportDate(message.Date))
+                    .Select(message => new
+                    {
+                        message.Id,
+                        message.GroupId,
+                        message.Sender,
+                        message.Content,
+                        message.Date,
+                        message.ReplyToMessageId,
+                        message.AttachmentUrl,
+                        message.AttachmentContentType,
+                        message.EditedAt
+                    }),
+                servers = new
+                {
+                    memberships,
+                    ownedServers,
+                    visibleServers = memberServers.Select(server => new
+                    {
+                        server.ServerID,
+                        server.ServerName,
+                        server.ServerOwner,
+                        server.Date,
+                        server.Description,
+                        server.ServerIconUrl,
+                        server.ServerBannerUrl,
+                        server.IsPublic,
+                        server.DiscoveryCategory,
+                        server.DiscoveryTagsJson,
+                        server.WelcomeEnabled,
+                        server.WelcomeMessage,
+                        server.WelcomeChecklistJson,
+                        server.VerificationLevel,
+                        server.RequireVerifiedEmail,
+                        server.MinimumAccountAgeMinutes,
+                        server.MinimumMembershipMinutes,
+                        server.RequireTwoFactorForModerators
+                    }),
+                    authoredMessages = authoredServerMessages
+                        .OrderBy(message => ParseExportDate(message.Date))
+                        .Select(message => new
+                        {
+                            message.MessageID,
+                            message.ChannelId,
+                            message.MessagesUserSender,
+                            message.Date,
+                            message.userText,
+                            message.ReplyToMessageId,
+                            message.AttachmentUrl,
+                            message.AttachmentContentType,
+                            message.EditedAt,
+                            message.IsPinned,
+                            message.PinnedBy,
+                            message.PinnedAt,
+                            message.IsBot,
+                            message.BotAccountId,
+                            message.IsWebhook,
+                            message.WebhookId,
+                            message.SenderDisplayName,
+                            message.SenderAvatarUrl
+                        }),
+                    authoredThreadMessages = authoredThreadMessages
+                        .OrderBy(message => ParseExportDate(message.Date))
+                        .Select(message => new
+                        {
+                            message.ThreadMessageId,
+                            message.ThreadId,
+                            message.MessagesUserSender,
+                            message.Date,
+                            message.userText,
+                            message.AttachmentUrl,
+                            message.AttachmentContentType,
+                            message.EditedAt
+                        })
+                },
+                reports = authoredReports,
+                oauth = new
+                {
+                    ownedApplications = oauthApplications.Select(application => new
+                    {
+                        application.Id,
+                        application.Name,
+                        application.Description,
+                        application.IconUrl,
+                        application.OwnerUsername,
+                        application.RedirectUrisJson,
+                        application.AllowedScopesJson,
+                        application.BotAccountId,
+                        application.CreatedAt,
+                        application.UpdatedAt,
+                        application.SecretLastRotatedAt,
+                        application.IsEnabled
+                    }),
+                    authorizations = oauthAuthorizations,
+                    accessTokens = oauthTokens.Select(token => new
+                    {
+                        token.Id,
+                        token.ApplicationId,
+                        token.AuthorizationId,
+                        token.Username,
+                        token.ServerId,
+                        token.ScopesJson,
+                        token.CreatedAt,
+                        token.ExpiresAt,
+                        token.RevokedAt
+                    })
+                },
+                summary = new
+                {
+                    directMessageCount = directMessages.Count,
+                    groupChatCount = groupChats.Count,
+                    groupMessageCount = groupMessages.Count,
+                    serverMembershipCount = memberships.Count,
+                    ownedServerCount = ownedServers.Count,
+                    authoredServerMessageCount = authoredServerMessages.Count,
+                    authoredThreadMessageCount = authoredThreadMessages.Count,
+                    reportCount = authoredReports.Count,
+                    ownedOAuthApplicationCount = oauthApplications.Count,
+                    authorizedApplicationCount = oauthAuthorizations.Count
+                }
+            };
+
+            var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(export, new JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+            var safeUsername = Regex.Replace(username, "[^A-Za-z0-9_.-]", "_");
+            var fileName = $"{safeUsername}-mydiscord-export-{exportedAt:yyyyMMddHHmmss}.json";
+            return File(jsonBytes, "application/json", fileName);
+        }
+
         [HttpPost]
         public IActionResult UpdateAccountSettings([FromBody] AccountSettingsUpdateRequest request)
         {
@@ -2624,6 +2905,31 @@ namespace DiscordCloneServer.Controllers
             {
                 return new JsonObject();
             }
+        }
+
+        private static JsonNode ParseExportJson(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return new JsonObject();
+            }
+
+            try
+            {
+                return JsonNode.Parse(value) ?? new JsonObject();
+            }
+            catch
+            {
+                return new JsonObject
+                {
+                    ["raw"] = value
+                };
+            }
+        }
+
+        private static DateTime ParseExportDate(string? date)
+        {
+            return DateTime.TryParse(date, out var parsedDate) ? parsedDate : DateTime.MinValue;
         }
 
         private static string GetCustomStatus(Account account)
