@@ -100,7 +100,11 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetPrivateMessage(string targetUsername, int take = 50, string? beforeMessageId = null)
+        public async Task<IActionResult> GetPrivateMessage(
+            string targetUsername,
+            int take = 50,
+            string? beforeMessageId = null,
+            bool includePageInfo = false)
         {
             var username = User.GetUsername();
             if (string.IsNullOrWhiteSpace(username))
@@ -125,16 +129,19 @@ namespace DiscordCloneServer.Controllers
                 })
                 .ToList();
 
+            var totalCount = orderedMessages.Count;
+            var boundaryCount = orderedMessages.Count;
             if (!string.IsNullOrWhiteSpace(beforeMessageId))
             {
                 var beforeIndex = orderedMessages.FindIndex(message => message.PrivateMessageID == beforeMessageId);
                 if (beforeIndex >= 0)
                 {
-                    orderedMessages = orderedMessages.Take(beforeIndex).ToList();
+                    boundaryCount = beforeIndex;
                 }
             }
 
-            var page = orderedMessages.TakeLast(take).ToList();
+            var pageWindow = orderedMessages.Take(boundaryCount).ToList();
+            var page = pageWindow.TakeLast(take).ToList();
             var messageIds = page.Select(message => message.PrivateMessageID).ToList();
             var reactions = await _context.MessageReactions
                 .Where(reaction => reaction.ScopeType == "dm" && messageIds.Contains(reaction.MessageId))
@@ -147,11 +154,27 @@ namespace DiscordCloneServer.Controllers
                 username,
                 HttpContext.RequestAborted);
 
-            return Ok(page.Select(message => BuildPrivateMessageResponse(
+            var responseMessages = page.Select(message => BuildPrivateMessageResponse(
                 message,
                 reactions.Where(reaction => reaction.MessageId == message.PrivateMessageID),
                 GetPrivateReplyPreview(message, replyPreviews),
-                pollLookup.GetValueOrDefault(message.PrivateMessageID))));
+                pollLookup.GetValueOrDefault(message.PrivateMessageID))).ToList();
+
+            if (!includePageInfo)
+            {
+                return Ok(responseMessages);
+            }
+
+            return Ok(new
+            {
+                messages = responseMessages,
+                hasMore = boundaryCount > page.Count,
+                nextBeforeMessageId = page.FirstOrDefault()?.PrivateMessageID,
+                beforeMessageId,
+                pageSize = take,
+                returnedCount = page.Count,
+                totalCount
+            });
         }
 
         [HttpPost]
@@ -221,7 +244,12 @@ namespace DiscordCloneServer.Controllers
             string targetUsername,
             string query = "",
             string? fromUser = null,
+            string? mentions = null,
+            string? after = null,
+            string? before = null,
             bool? hasAttachment = null,
+            string? attachmentType = null,
+            bool? hasLink = null,
             int take = 50)
         {
             var username = User.GetUsername();
@@ -234,6 +262,9 @@ namespace DiscordCloneServer.Controllers
 
             query = query?.Trim() ?? string.Empty;
             fromUser = fromUser?.Trim();
+            mentions = NormalizeMentionFilter(mentions);
+            var afterDate = ParseSearchBoundary(after, endOfDay: false);
+            var beforeDate = ParseSearchBoundary(before, endOfDay: true);
             take = Math.Clamp(take, 1, 100);
 
             var messages = await _context.PrivateMessageFriends
@@ -246,8 +277,18 @@ namespace DiscordCloneServer.Controllers
                                   message.FriendMessagesData.Contains(query, StringComparison.OrdinalIgnoreCase))
                 .Where(message => string.IsNullOrWhiteSpace(fromUser) ||
                                   string.Equals(message.MessagesUserSender, fromUser, StringComparison.OrdinalIgnoreCase))
+                .Where(message => string.IsNullOrWhiteSpace(mentions) ||
+                                  ExtractMentions(message.FriendMessagesData).Contains(mentions, StringComparer.OrdinalIgnoreCase))
+                .Where(message => afterDate == null || ParseDate(message.Date) >= afterDate.Value)
+                .Where(message => beforeDate == null || ParseDate(message.Date) <= beforeDate.Value)
                 .Where(message => hasAttachment == null ||
                                   (!string.IsNullOrWhiteSpace(message.AttachmentUrl) == hasAttachment.Value))
+                .Where(message => MatchesAttachmentType(
+                    message.AttachmentContentType,
+                    message.AttachmentUrl,
+                    attachmentType))
+                .Where(message => hasLink == null ||
+                                  ContainsLink(message.FriendMessagesData) == hasLink.Value)
                 .OrderByDescending(message => ParseDate(message.Date))
                 .Take(take)
                 .ToList();
@@ -774,6 +815,65 @@ namespace DiscordCloneServer.Controllers
         private static DateTime ParseDate(string? date)
         {
             return DateTime.TryParse(date, out var dt) ? dt : DateTime.MinValue;
+        }
+
+        private static DateTime? ParseSearchBoundary(string? value, bool endOfDay)
+        {
+            if (string.IsNullOrWhiteSpace(value) || !DateTime.TryParse(value, out var parsed))
+            {
+                return null;
+            }
+
+            var trimmed = value.Trim();
+            var hasTime = trimmed.Contains(':') || trimmed.Contains("T", StringComparison.OrdinalIgnoreCase);
+            if (endOfDay && !hasTime)
+            {
+                return parsed.Date.AddDays(1).AddTicks(-1);
+            }
+
+            return parsed;
+        }
+
+        private static string NormalizeMentionFilter(string? value)
+        {
+            return value?.Trim().TrimStart('@') ?? string.Empty;
+        }
+
+        private static bool ContainsLink(string? text)
+        {
+            return !string.IsNullOrWhiteSpace(text) &&
+                   System.Text.RegularExpressions.Regex.IsMatch(
+                       text,
+                       @"(?:https?://|www\.)\S+",
+                       System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+
+        private static bool MatchesAttachmentType(string? contentType, string? attachmentUrl, string? attachmentType)
+        {
+            var normalized = attachmentType?.Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(normalized) || normalized == "any")
+            {
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(attachmentUrl))
+            {
+                return false;
+            }
+
+            var mediaType = contentType?.Trim().ToLowerInvariant() ?? string.Empty;
+            var isImage = mediaType.StartsWith("image/", StringComparison.Ordinal);
+            var isVideo = mediaType.StartsWith("video/", StringComparison.Ordinal);
+            var isAudio = mediaType.StartsWith("audio/", StringComparison.Ordinal);
+
+            return normalized switch
+            {
+                "image" => isImage,
+                "video" => isVideo,
+                "audio" => isAudio,
+                "file" => !isImage && !isVideo && !isAudio,
+                _ => true
+            };
         }
 
         private static string[] ExtractMentions(string? text)
