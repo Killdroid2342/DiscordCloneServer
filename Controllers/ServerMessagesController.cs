@@ -40,11 +40,13 @@ namespace DiscordCloneServer.Controllers
             serverMessage.AttachmentUrl = NormalizeOptional(serverMessage.AttachmentUrl);
             serverMessage.AttachmentContentType = NormalizeOptional(serverMessage.AttachmentContentType);
             serverMessage.ReplyToMessageId = NormalizeOptional(serverMessage.ReplyToMessageId);
+            if (!MessagePollService.TryNormalizeDraft(serverMessage.Poll, out var pollDraft, out var pollError))
+                return BadRequest(new { message = pollError });
 
             if (string.IsNullOrWhiteSpace(serverMessage.ChannelId))
                 return BadRequest(new { message = "Channel is required." });
-            if (!IsValidMessageBody(serverMessage.userText, serverMessage.AttachmentUrl))
-                return BadRequest(new { message = "Message must be 1-4000 characters or include an attachment." });
+            if (!IsValidMessageBody(serverMessage.userText, serverMessage.AttachmentUrl, pollDraft != null))
+                return BadRequest(new { message = "Message must be 1-4000 characters, include an attachment, or include a poll." });
             if (!IsValidAttachment(serverMessage.AttachmentUrl))
                 return BadRequest(new { message = "Attachment must be blank, an http URL, or an uploaded file URL." });
 
@@ -70,11 +72,15 @@ namespace DiscordCloneServer.Controllers
                     verificationLevel = verification.Level
                 });
 
-            if (!string.IsNullOrWhiteSpace(serverMessage.ReplyToMessageId) &&
-                !await _context.ServerMessages.AnyAsync(message =>
+            Models.ServerMessage? replyTarget = null;
+            if (!string.IsNullOrWhiteSpace(serverMessage.ReplyToMessageId))
+            {
+                replyTarget = await _context.ServerMessages.FirstOrDefaultAsync(message =>
                     message.MessageID == serverMessage.ReplyToMessageId &&
-                    message.ChannelId == serverMessage.ChannelId))
-                return BadRequest(new { message = "Reply target was not found in this channel." });
+                    message.ChannelId == serverMessage.ChannelId);
+                if (replyTarget == null)
+                    return BadRequest(new { message = "Reply target was not found in this channel." });
+            }
 
             serverMessage.MessageID = string.IsNullOrWhiteSpace(serverMessage.MessageID)
                 ? Guid.NewGuid().ToString()
@@ -86,9 +92,25 @@ namespace DiscordCloneServer.Controllers
                 return Conflict(new { message = "Duplicate message id." });
 
             _context.ServerMessages.Add(serverMessage);
+            if (pollDraft != null)
+            {
+                MessagePollService.AddPoll(_context, "server", serverMessage.MessageID, username, pollDraft);
+            }
+
             await _context.SaveChangesAsync();
             await SendServerMentionEmailNotifications(serverMessage, channel);
-            return Ok(BuildMessageResponse(serverMessage, Array.Empty<MessageReaction>()));
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "server",
+                new[] { serverMessage.MessageID },
+                username,
+                HttpContext.RequestAborted);
+            return Ok(BuildMessageResponse(
+                serverMessage,
+                Array.Empty<MessageReaction>(),
+                null,
+                replyTarget,
+                pollLookup.GetValueOrDefault(serverMessage.MessageID)));
         }
 
         [HttpGet]
@@ -136,11 +158,20 @@ namespace DiscordCloneServer.Controllers
                     .Where(reaction => reaction.ScopeType == "server" && messageIds.Contains(reaction.MessageId))
                     .ToListAsync();
                 var threadSummaries = await GetThreadSummariesForParentMessages(messageIds);
+                var replyPreviews = await GetServerReplyPreviewLookup(page);
+                var pollLookup = await MessagePollService.GetPollLookupAsync(
+                    _context,
+                    "server",
+                    messageIds,
+                    username,
+                    HttpContext.RequestAborted);
 
                 return Ok(page.Select(message => BuildMessageResponse(
                     message,
                     reactions.Where(reaction => reaction.MessageId == message.MessageID),
-                    threadSummaries.GetValueOrDefault(message.MessageID))));
+                    threadSummaries.GetValueOrDefault(message.MessageID),
+                    GetServerReplyPreview(message, replyPreviews),
+                    pollLookup.GetValueOrDefault(message.MessageID))));
             }
             catch (Exception ex)
             {
@@ -164,8 +195,14 @@ namespace DiscordCloneServer.Controllers
 
             var nextText = request.UserText?.Trim() ?? string.Empty;
             var nextAttachmentUrl = NormalizeOptional(request.AttachmentUrl);
-            if (!IsValidMessageBody(nextText, nextAttachmentUrl))
-                return BadRequest(new { message = "Message must be 1-4000 characters or include an attachment." });
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "server",
+                new[] { message.MessageID },
+                username,
+                HttpContext.RequestAborted);
+            if (!IsValidMessageBody(nextText, nextAttachmentUrl, pollLookup.ContainsKey(message.MessageID)))
+                return BadRequest(new { message = "Message must be 1-4000 characters, include an attachment, or include a poll." });
             if (!IsValidAttachment(nextAttachmentUrl))
                 return BadRequest(new { message = "Attachment must be blank, an http URL, or an uploaded file URL." });
 
@@ -174,7 +211,13 @@ namespace DiscordCloneServer.Controllers
             message.AttachmentContentType = NormalizeOptional(request.AttachmentContentType);
             message.EditedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
-            return Ok(BuildMessageResponse(message, await GetReactionsForMessage("server", message.MessageID)));
+            var replyPreviews = await GetServerReplyPreviewLookup(new[] { message });
+            return Ok(BuildMessageResponse(
+                message,
+                await GetReactionsForMessage("server", message.MessageID),
+                null,
+                GetServerReplyPreview(message, replyPreviews),
+                pollLookup.GetValueOrDefault(message.MessageID)));
         }
 
         [HttpPost]
@@ -210,6 +253,11 @@ namespace DiscordCloneServer.Controllers
                 _context.ServerThreads.RemoveRange(childThreads);
             }
 
+            await MessagePollService.RemovePollsForMessagesAsync(
+                _context,
+                "server",
+                new[] { message.MessageID },
+                HttpContext.RequestAborted);
             _context.ServerMessages.Remove(message);
             await _context.SaveChangesAsync();
             return Ok(new { message = "Message deleted." });
@@ -260,10 +308,20 @@ namespace DiscordCloneServer.Controllers
             var reactions = await _context.MessageReactions
                 .Where(reaction => reaction.ScopeType == "server" && messageIds.Contains(reaction.MessageId))
                 .ToListAsync();
+            var replyPreviews = await GetServerReplyPreviewLookup(filtered);
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "server",
+                messageIds,
+                username,
+                HttpContext.RequestAborted);
 
             return Ok(filtered.Select(message => BuildMessageResponse(
                 message,
-                reactions.Where(reaction => reaction.MessageId == message.MessageID))));
+                reactions.Where(reaction => reaction.MessageId == message.MessageID),
+                null,
+                GetServerReplyPreview(message, replyPreviews),
+                pollLookup.GetValueOrDefault(message.MessageID))));
         }
 
         [HttpGet]
@@ -288,11 +346,20 @@ namespace DiscordCloneServer.Controllers
                 .Where(reaction => reaction.ScopeType == "server" && messageIds.Contains(reaction.MessageId))
                 .ToListAsync();
             var threadSummaries = await GetThreadSummariesForParentMessages(messageIds);
+            var replyPreviews = await GetServerReplyPreviewLookup(pinnedMessages);
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "server",
+                messageIds,
+                username,
+                HttpContext.RequestAborted);
 
             return Ok(pinnedMessages.Select(message => BuildMessageResponse(
                 message,
                 reactions.Where(reaction => reaction.MessageId == message.MessageID),
-                threadSummaries.GetValueOrDefault(message.MessageID))));
+                threadSummaries.GetValueOrDefault(message.MessageID),
+                GetServerReplyPreview(message, replyPreviews),
+                pollLookup.GetValueOrDefault(message.MessageID))));
         }
 
         [HttpPost]
@@ -332,10 +399,19 @@ namespace DiscordCloneServer.Controllers
 
             await _context.SaveChangesAsync();
             var threadSummaries = await GetThreadSummariesForParentMessages(new[] { message.MessageID });
+            var replyPreviews = await GetServerReplyPreviewLookup(new[] { message });
+            var pollLookup = await MessagePollService.GetPollLookupAsync(
+                _context,
+                "server",
+                new[] { message.MessageID },
+                username,
+                HttpContext.RequestAborted);
             return Ok(BuildMessageResponse(
                 message,
                 await GetReactionsForMessage("server", message.MessageID),
-                threadSummaries.GetValueOrDefault(message.MessageID)));
+                threadSummaries.GetValueOrDefault(message.MessageID),
+                GetServerReplyPreview(message, replyPreviews),
+                pollLookup.GetValueOrDefault(message.MessageID)));
         }
 
         [HttpGet]
@@ -731,6 +807,39 @@ namespace DiscordCloneServer.Controllers
                 .ToDictionary(group => group.Key, group => group.Count());
         }
 
+        private async Task<Dictionary<string, Models.ServerMessage>> GetServerReplyPreviewLookup(
+            IEnumerable<Models.ServerMessage> messages)
+        {
+            var replyIds = messages
+                .Select(message => message.ReplyToMessageId)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (replyIds.Count == 0)
+            {
+                return new Dictionary<string, Models.ServerMessage>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            var replyMessages = await _context.ServerMessages
+                .Where(message => replyIds.Contains(message.MessageID))
+                .ToListAsync();
+
+            return replyMessages
+                .GroupBy(message => message.MessageID, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static Models.ServerMessage? GetServerReplyPreview(
+            Models.ServerMessage message,
+            IReadOnlyDictionary<string, Models.ServerMessage> replyPreviews)
+        {
+            return !string.IsNullOrWhiteSpace(message.ReplyToMessageId) &&
+                   replyPreviews.TryGetValue(message.ReplyToMessageId, out var preview)
+                ? preview
+                : null;
+        }
+
         private async Task<ThreadAccessResult> GetThreadAccess(string? threadId, string username)
         {
             var normalizedThreadId = threadId?.Trim() ?? string.Empty;
@@ -1007,7 +1116,9 @@ namespace DiscordCloneServer.Controllers
         private static object BuildMessageResponse(
             Models.ServerMessage message,
             IEnumerable<MessageReaction> reactions,
-            ThreadSummaryData? threadSummary = null)
+            ThreadSummaryData? threadSummary = null,
+            Models.ServerMessage? replyPreview = null,
+            MessagePollResponse? poll = null)
         {
             return new
             {
@@ -1023,12 +1134,32 @@ namespace DiscordCloneServer.Controllers
                 message.IsPinned,
                 message.PinnedBy,
                 message.PinnedAt,
+                ReplyPreview = BuildServerReplyPreview(replyPreview),
                 Thread = threadSummary == null
                     ? null
                     : BuildThreadResponse(threadSummary.Thread, threadSummary.MessageCount, message),
                 ThreadMessageCount = threadSummary?.MessageCount ?? 0,
                 Mentions = ExtractMentions(message.userText),
-                Reactions = SummarizeReactions(reactions)
+                Reactions = SummarizeReactions(reactions),
+                Poll = poll
+            };
+        }
+
+        private static object? BuildServerReplyPreview(Models.ServerMessage? message)
+        {
+            if (message == null)
+            {
+                return null;
+            }
+
+            return new
+            {
+                MessageId = message.MessageID,
+                Sender = message.MessagesUserSender,
+                Date = message.Date,
+                Text = message.userText,
+                message.AttachmentUrl,
+                message.AttachmentContentType
             };
         }
 
@@ -1113,10 +1244,11 @@ namespace DiscordCloneServer.Controllers
             return DateTime.TryParse(date, out var dt) ? dt : DateTime.MinValue;
         }
 
-        private static bool IsValidMessageBody(string? message, string? attachmentUrl)
+        private static bool IsValidMessageBody(string? message, string? attachmentUrl, bool hasPoll = false)
         {
             return (!string.IsNullOrWhiteSpace(message) && message.Length <= 4000) ||
-                   !string.IsNullOrWhiteSpace(attachmentUrl);
+                   !string.IsNullOrWhiteSpace(attachmentUrl) ||
+                   hasPoll;
         }
 
         private static bool IsValidAttachment(string? attachmentUrl)
