@@ -57,6 +57,150 @@ namespace DiscordCloneServer.Controllers
             "music-fan"
         };
 
+        private sealed record ServerTemplateChannelDefinition(string Name, string Type);
+        private sealed record ServerTemplateCategoryDefinition(string Name, IReadOnlyList<ServerTemplateChannelDefinition> Channels);
+        private sealed record ServerTemplateDefinition(
+            string Id,
+            string Name,
+            string Description,
+            string DiscoveryCategory,
+            string[] WelcomeChecklist,
+            IReadOnlyList<ServerTemplateCategoryDefinition> Categories);
+
+        private static readonly ServerTemplateDefinition[] ServerTemplates =
+        {
+            new(
+                "friends",
+                "Friends",
+                "A simple server for a small group.",
+                "community",
+                new[]
+                {
+                    "Read the welcome message",
+                    "Say hello in the general channel",
+                    "Join a voice channel when you are ready"
+                },
+                new[]
+                {
+                    new ServerTemplateCategoryDefinition(
+                        "Text Channels",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("general", "text")
+                        }),
+                    new ServerTemplateCategoryDefinition(
+                        "Voice Channels",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("General", "voice")
+                        }),
+                    new ServerTemplateCategoryDefinition(
+                        "Stage Channels",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("Town Hall", "stage")
+                        })
+                }),
+            new(
+                "community",
+                "Community",
+                "Announcements, intros, events, and public gathering spaces.",
+                "community",
+                new[]
+                {
+                    "Read the rules",
+                    "Introduce yourself",
+                    "Check upcoming events"
+                },
+                new[]
+                {
+                    new ServerTemplateCategoryDefinition(
+                        "Information",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("rules", "text"),
+                            new ServerTemplateChannelDefinition("announcements", "text")
+                        }),
+                    new ServerTemplateCategoryDefinition(
+                        "Community",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("general", "text"),
+                            new ServerTemplateChannelDefinition("introductions", "text"),
+                            new ServerTemplateChannelDefinition("events", "text")
+                        }),
+                    new ServerTemplateCategoryDefinition(
+                        "Voice",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("Lounge", "voice"),
+                            new ServerTemplateChannelDefinition("Town Hall", "stage")
+                        })
+                }),
+            new(
+                "gaming",
+                "Gaming",
+                "Squads, clips, game chat, and voice lobbies.",
+                "gaming",
+                new[]
+                {
+                    "Pick a game channel",
+                    "Share your tag in general",
+                    "Join a squad voice room"
+                },
+                new[]
+                {
+                    new ServerTemplateCategoryDefinition(
+                        "Lobby",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("announcements", "text"),
+                            new ServerTemplateChannelDefinition("general", "text"),
+                            new ServerTemplateChannelDefinition("looking-for-group", "text"),
+                            new ServerTemplateChannelDefinition("clips", "text")
+                        }),
+                    new ServerTemplateCategoryDefinition(
+                        "Voice",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("Lobby", "voice"),
+                            new ServerTemplateChannelDefinition("Squad 1", "voice"),
+                            new ServerTemplateChannelDefinition("Squad 2", "voice"),
+                            new ServerTemplateChannelDefinition("AFK", "voice")
+                        })
+                }),
+            new(
+                "study",
+                "Study Group",
+                "Focused rooms for classes, resources, and quiet study.",
+                "education",
+                new[]
+                {
+                    "Post your subjects",
+                    "Read shared resources",
+                    "Join a study room"
+                },
+                new[]
+                {
+                    new ServerTemplateCategoryDefinition(
+                        "Study Rooms",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("general", "text"),
+                            new ServerTemplateChannelDefinition("homework-help", "text"),
+                            new ServerTemplateChannelDefinition("resources", "text")
+                        }),
+                    new ServerTemplateCategoryDefinition(
+                        "Voice Rooms",
+                        new[]
+                        {
+                            new ServerTemplateChannelDefinition("Study Room 1", "voice"),
+                            new ServerTemplateChannelDefinition("Study Room 2", "voice"),
+                            new ServerTemplateChannelDefinition("Quiet Focus", "voice")
+                        })
+                })
+        };
+
         public ServerController(ApiContext context, IConfiguration config, IHubContext<ChatHub> hubContext)
         {
             _context = context;
@@ -78,6 +222,8 @@ namespace DiscordCloneServer.Controllers
                 server.InviteLink,
                 server.Date,
                 server.Description,
+                server.ServerIconUrl,
+                server.ServerBannerUrl,
                 server.IsPublic,
                 server.DiscoveryCategory,
                 DiscoveryTags = DeserializeDiscoveryTags(server.DiscoveryTagsJson),
@@ -107,6 +253,8 @@ namespace DiscordCloneServer.Controllers
                 server.ServerName,
                 server.ServerOwner,
                 server.Description,
+                server.ServerIconUrl,
+                server.ServerBannerUrl,
                 server.IsPublic,
                 server.DiscoveryCategory,
                 DiscoveryTags = DeserializeDiscoveryTags(server.DiscoveryTagsJson),
@@ -119,6 +267,47 @@ namespace DiscordCloneServer.Controllers
             };
         }
 
+        private static object BuildServerTemplateResponse(ServerTemplateDefinition template)
+        {
+            return new
+            {
+                template.Id,
+                template.Name,
+                template.Description,
+                template.DiscoveryCategory,
+                template.WelcomeChecklist,
+                Categories = template.Categories.Select(category => new
+                {
+                    category.Name,
+                    Channels = category.Channels.Select(channel => new
+                    {
+                        channel.Name,
+                        Type = NormalizeChannelType(channel.Type) ?? "text"
+                    })
+                })
+            };
+        }
+
+        private static ServerTemplateDefinition GetServerTemplate(string? templateId)
+        {
+            var normalizedTemplateId = templateId?.Trim();
+            return ServerTemplates.FirstOrDefault(template =>
+                       string.Equals(template.Id, normalizedTemplateId, StringComparison.OrdinalIgnoreCase)) ??
+                   ServerTemplates[0];
+        }
+
+        private static string GetDefaultRoleColor(string? name)
+        {
+            return NormalizeRoleName(name) switch
+            {
+                "owner" => "#f0b232",
+                "admin" => "#ed4245",
+                "moderator" => "#23a559",
+                "user" => "#5865f2",
+                _ => "#949ba4"
+            };
+        }
+
         private static ServerRole BuildDefaultRole(string serverId, string name, int position)
         {
             var normalizedName = NormalizeRoleName(name);
@@ -127,6 +316,7 @@ namespace DiscordCloneServer.Controllers
                 Id = Guid.NewGuid().ToString(),
                 ServerId = serverId,
                 Name = normalizedName,
+                Color = GetDefaultRoleColor(normalizedName),
                 Position = position,
                 CanManageServer = normalizedName == "owner" || normalizedName == "admin",
                 CanManageChannels = normalizedName is "owner" or "admin" or "moderator",
@@ -242,6 +432,9 @@ namespace DiscordCloneServer.Controllers
             public DateTime? MutedUntil { get; set; }
             public bool IsTimedOut { get; set; }
             public DateTime? TimedOutUntil { get; set; }
+            public bool IsBot { get; set; }
+            public string? BotAccountId { get; set; }
+            public bool IsEnabled { get; set; } = true;
         }
 
         private static ServerMemberResponse BuildMemberResponse(ServerMember member, string username, string role, DateTime now)
@@ -279,6 +472,25 @@ namespace DiscordCloneServer.Controllers
                 MutedUntil = isMuted ? GetActiveMuteUntil(entries, now) : null,
                 IsTimedOut = timeoutUntil != null,
                 TimedOutUntil = timeoutUntil
+            };
+        }
+
+        private static ServerMemberResponse BuildBotMemberResponse(BotAccount bot)
+        {
+            return new ServerMemberResponse
+            {
+                Id = bot.Id,
+                Username = string.IsNullOrWhiteSpace(bot.DisplayName) ? bot.Username : bot.DisplayName,
+                Role = NormalizeRoleName(bot.Role),
+                ProfilePictureUrl = bot.AvatarUrl,
+                PresenceStatus = bot.IsEnabled ? "online" : "offline",
+                CustomStatus = bot.IsEnabled ? "Bot account" : "Bot disabled",
+                ActivityStatus = "Bot account",
+                ShowActivity = true,
+                Badges = Array.Empty<string>(),
+                IsBot = true,
+                BotAccountId = bot.Id,
+                IsEnabled = bot.IsEnabled
             };
         }
 
@@ -421,6 +633,48 @@ namespace DiscordCloneServer.Controllers
             return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
         }
 
+        private static DateTime? ParseAuditBoundary(string? value, bool endOfDay)
+        {
+            if (string.IsNullOrWhiteSpace(value) || !DateTime.TryParse(value, out var parsed))
+            {
+                return null;
+            }
+
+            var hasExplicitTime = value.Contains(':', StringComparison.Ordinal) ||
+                                  value.Contains('T', StringComparison.OrdinalIgnoreCase);
+            if (!hasExplicitTime)
+            {
+                parsed = endOfDay
+                    ? parsed.Date.AddDays(1).AddTicks(-1)
+                    : parsed.Date;
+            }
+
+            return parsed;
+        }
+
+        private static bool AuditTextContains(string? source, string query)
+        {
+            return !string.IsNullOrWhiteSpace(source) &&
+                   source.Contains(query, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool MatchesAuditLogSearch(ServerAuditLog log, string query)
+        {
+            return string.IsNullOrWhiteSpace(query) ||
+                   AuditTextContains(log.ActionType, query) ||
+                   AuditTextContains(log.ActorUsername, query) ||
+                   AuditTextContains(log.TargetType, query) ||
+                   AuditTextContains(log.TargetId, query) ||
+                   AuditTextContains(log.TargetUsername, query) ||
+                   AuditTextContains(log.DetailsJson, query);
+        }
+
+
+        [HttpGet]
+        public IActionResult GetServerTemplates()
+        {
+            return Ok(ServerTemplates.Select(BuildServerTemplateResponse));
+        }
 
         [HttpPost]
         public async Task<IActionResult> CreateServer([FromBody] CreateServer createServer)
@@ -436,25 +690,31 @@ namespace DiscordCloneServer.Controllers
 
             createServer.ServerName = createServer.ServerName?.Trim() ?? string.Empty;
             createServer.ServerOwner = currentUsername;
+            createServer.ServerIconUrl = NormalizeOptionalMediaUrl(createServer.ServerIconUrl);
+            createServer.ServerBannerUrl = NormalizeOptionalMediaUrl(createServer.ServerBannerUrl);
 
             Console.WriteLine($"making new server: '{createServer.ServerName}' by {createServer.ServerOwner}");
 
             if (!IsValidServerName(createServer.ServerName))
                 return BadRequest(new { Message = "Server name must be 1-100 characters." });
+            if (!IsValidServerMediaUrl(createServer.ServerIconUrl) || !IsValidServerMediaUrl(createServer.ServerBannerUrl))
+                return BadRequest(new { Message = "Server icon and banner must be blank, an http URL, or an uploaded file URL." });
 
+            var template = GetServerTemplate(createServer.TemplateId);
             createServer.ServerID = Guid.NewGuid().ToString();
             createServer.Date = DateTime.UtcNow;
+            createServer.Description = NormalizeOptionalDescription(createServer.Description, 240) ?? template.Description;
             createServer.VerificationLevel = ServerVerificationPolicy.None;
             createServer.RequireVerifiedEmail = false;
             createServer.MinimumAccountAgeMinutes = 0;
             createServer.MinimumMembershipMinutes = 0;
             createServer.RequireTwoFactorForModerators = false;
             createServer.IsPublic = false;
-            createServer.DiscoveryCategory = null;
+            createServer.DiscoveryCategory = NormalizeDiscoveryCategory(template.DiscoveryCategory);
             createServer.DiscoveryTagsJson = SerializeDiscoveryTags(Array.Empty<string>());
             createServer.WelcomeEnabled = true;
             createServer.WelcomeMessage = null;
-            createServer.WelcomeChecklistJson = SerializeWelcomeChecklist(DefaultWelcomeChecklist());
+            createServer.WelcomeChecklistJson = SerializeWelcomeChecklist(template.WelcomeChecklist);
             var defaultInviteCode = GenerateInviteCode();
             createServer.InviteLink = BuildInviteLink(Request, defaultInviteCode);
 
@@ -489,26 +749,42 @@ namespace DiscordCloneServer.Controllers
             _context.ServerMembers.Add(ownerMembership);
             await _context.SaveChangesAsync();
 
-         
-            var textCategory = new Category { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, Name = "Text Channels", Position = 0 };
-            var voiceCategory = new Category { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, Name = "Voice Channels", Position = 1 };
-            var stageCategory = new Category { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, Name = "Stage Channels", Position = 2 };
+            var categories = new List<Category>();
+            var channels = new List<Channel>();
+            foreach (var (templateCategory, categoryIndex) in template.Categories.Select((value, index) => (value, index)))
+            {
+                var category = new Category
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    ServerId = createServer.ServerID,
+                    Name = templateCategory.Name,
+                    Position = categoryIndex
+                };
+                categories.Add(category);
 
-            _context.Categories.AddRange(textCategory, voiceCategory, stageCategory);
+                foreach (var (templateChannel, channelIndex) in templateCategory.Channels.Select((value, index) => (value, index)))
+                {
+                    channels.Add(new Channel
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        ServerId = createServer.ServerID,
+                        CategoryId = category.Id,
+                        Name = NormalizeName(templateChannel.Name),
+                        Type = NormalizeChannelType(templateChannel.Type) ?? "text",
+                        Position = channelIndex
+                    });
+                }
+            }
 
-           
-            var generalText = new Channel { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, CategoryId = textCategory.Id, Name = "general", Type = "text", Position = 0 };
-            var generalVoice = new Channel { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, CategoryId = voiceCategory.Id, Name = "General", Type = "voice", Position = 0 };
-            var townHallStage = new Channel { Id = Guid.NewGuid().ToString(), ServerId = createServer.ServerID, CategoryId = stageCategory.Id, Name = "Town Hall", Type = "stage", Position = 0 };
-
-            _context.Channels.AddRange(generalText, generalVoice, townHallStage);
+            _context.Categories.AddRange(categories);
+            _context.Channels.AddRange(channels);
             AddAuditLog(
                 createServer.ServerID,
                 "server_created",
                 currentUsername,
                 "server",
                 createServer.ServerID,
-                details: new { createServer.ServerName });
+                details: new { createServer.ServerName, TemplateId = template.Id });
             await _context.SaveChangesAsync();
 
             return Ok(BuildServerResponse(createServer, "owner"));
@@ -728,6 +1004,51 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpPost]
+        public async Task<IActionResult> UpdateServerAppearance([FromBody] ServerAppearanceRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageServer(request.ServerId, currentUsername))
+                return Forbid();
+
+            var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == request.ServerId);
+            if (server == null)
+                return NotFound(new { Message = "Server not found." });
+
+            var iconUrl = NormalizeOptionalMediaUrl(request.ServerIconUrl);
+            var bannerUrl = NormalizeOptionalMediaUrl(request.ServerBannerUrl);
+            if (!IsValidServerMediaUrl(iconUrl) || !IsValidServerMediaUrl(bannerUrl))
+                return BadRequest(new { Message = "Server icon and banner must be blank, an http URL, or an uploaded file URL." });
+
+            server.ServerIconUrl = iconUrl;
+            server.ServerBannerUrl = bannerUrl;
+
+            AddAuditLog(
+                request.ServerId,
+                "server_appearance_updated",
+                currentUsername,
+                "server",
+                request.ServerId,
+                details: new
+                {
+                    server.ServerIconUrl,
+                    server.ServerBannerUrl
+                });
+            await _context.SaveChangesAsync();
+
+            return Ok(BuildServerResponse(
+                server,
+                server.ServerOwner == currentUsername
+                    ? "owner"
+                    : await _context.ServerMembers
+                        .Where(member => member.ServerId == request.ServerId && member.Username == currentUsername)
+                        .Select(member => member.Role)
+                        .FirstOrDefaultAsync() ?? "user"));
+        }
+
+        [HttpPost]
         public async Task<IActionResult> UpdateWelcomeScreen([FromBody] ServerWelcomeRequest request)
         {
             var currentUsername = GetCurrentUsername();
@@ -911,6 +1232,14 @@ namespace DiscordCloneServer.Controllers
                 .OrderBy(c => c.Position)
                 .ThenBy(c => c.Name)
                 .ToListAsync();
+            var visibleChannels = new List<Channel>();
+            foreach (var channel in channels)
+            {
+                if (await CanViewChannel(channel, currentUsername))
+                {
+                    visibleChannels.Add(channel);
+                }
+            }
             var membership = await _context.ServerMembers
                 .Where(member => member.ServerId == serverId && member.Username == currentUsername)
                 .OrderByDescending(member => member.Role == "owner")
@@ -926,7 +1255,7 @@ namespace DiscordCloneServer.Controllers
                         : membership?.Role ?? "user",
                     onboardingCompletedAt: membership?.OnboardingCompletedAt),
                 Categories = categories,
-                Channels = channels
+                Channels = visibleChannels
             });
         }
 
@@ -979,11 +1308,17 @@ namespace DiscordCloneServer.Controllers
             var dedupedMembers = members
                 .GroupBy(member => member.Username)
                 .Select(group => BuildMemberResponse(group, now))
-                .OrderBy(member => member.Role == "owner" ? 0 : 1)
-                .ThenBy(member => member.Username)
                 .ToList();
 
-            var usernames = dedupedMembers.Select(member => member.Username).ToList();
+            var bots = await _context.BotAccounts
+                .Where(bot => bot.ServerId == serverId)
+                .ToListAsync();
+            dedupedMembers.AddRange(bots.Select(BuildBotMemberResponse));
+
+            var usernames = dedupedMembers
+                .Where(member => !member.IsBot)
+                .Select(member => member.Username)
+                .ToList();
             var accounts = await _context.Accounts
                 .Where(account => usernames.Contains(account.UserName) && !account.IsDisabled)
                 .ToDictionaryAsync(account => account.UserName, StringComparer.OrdinalIgnoreCase);
@@ -994,27 +1329,60 @@ namespace DiscordCloneServer.Controllers
                 ApplyMemberAccountData(member, account);
             }
 
-            return Ok(dedupedMembers);
+            return Ok(dedupedMembers
+                .OrderBy(member => member.Role == "owner" ? 0 : 1)
+                .ThenBy(member => member.IsBot ? 1 : 0)
+                .ThenBy(member => member.Username)
+                .ToList());
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetAuditLogs(string serverId, int take = 50)
+        public async Task<IActionResult> GetAuditLogs(
+            string serverId,
+            int take = 50,
+            string query = "",
+            string? actionType = null,
+            string? actor = null,
+            string? target = null,
+            string? after = null,
+            string? before = null)
         {
             var currentUsername = GetCurrentUsername();
             if (currentUsername == null)
                 return Unauthorized(new { Message = "Missing user identity." });
 
-            if (!await CanManageServer(serverId, currentUsername))
+            var normalizedServerId = serverId?.Trim() ?? string.Empty;
+            if (!await CanManageServer(normalizedServerId, currentUsername))
                 return Forbid();
 
+            query = query?.Trim() ?? string.Empty;
+            actionType = NormalizeOptionalAuditValue(actionType);
+            actor = NormalizeOptionalAuditValue(actor);
+            target = NormalizeOptionalAuditValue(target);
+            var afterDate = ParseAuditBoundary(after, endOfDay: false);
+            var beforeDate = ParseAuditBoundary(before, endOfDay: true);
             take = Math.Clamp(take, 1, 100);
             var logs = await _context.ServerAuditLogs
-                .Where(log => log.ServerId == serverId)
+                .Where(log => log.ServerId == normalizedServerId)
                 .OrderByDescending(log => log.CreatedAt)
-                .Take(take)
                 .ToListAsync();
 
-            return Ok(logs.Select(BuildAuditLogResponse));
+            var filteredLogs = logs
+                .Where(log => MatchesAuditLogSearch(log, query))
+                .Where(log => string.IsNullOrWhiteSpace(actionType) ||
+                              log.ActionType.Contains(actionType, StringComparison.OrdinalIgnoreCase))
+                .Where(log => string.IsNullOrWhiteSpace(actor) ||
+                              log.ActorUsername.Contains(actor, StringComparison.OrdinalIgnoreCase))
+                .Where(log => string.IsNullOrWhiteSpace(target) ||
+                              AuditTextContains(log.TargetType, target) ||
+                              AuditTextContains(log.TargetId, target) ||
+                              AuditTextContains(log.TargetUsername, target))
+                .Where(log => afterDate == null || log.CreatedAt >= afterDate.Value)
+                .Where(log => beforeDate == null || log.CreatedAt <= beforeDate.Value)
+                .Take(take)
+                .ToList();
+
+            return Ok(filteredLogs.Select(BuildAuditLogResponse));
         }
 
         [HttpPost]
@@ -1166,6 +1534,111 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpGet]
+        public async Task<IActionResult> GetChannelPermissions(string channelId)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == channelId);
+            if (channel == null)
+                return NotFound(new { Message = "Channel not found." });
+
+            if (!await CanViewChannel(channel, currentUsername))
+                return Forbid();
+
+            await EnsureDefaultRoles(channel.ServerId);
+            return Ok(await BuildChannelPermissionsResponse(channel));
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> UpdateChannelPermissions([FromBody] ChannelPermissionsRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(c => c.Id == request.ChannelId);
+            if (channel == null)
+                return NotFound(new { Message = "Channel not found." });
+
+            if (!await CanManageChannels(channel.ServerId, currentUsername))
+                return Forbid();
+
+            await EnsureDefaultRoles(channel.ServerId);
+            var validRoleNames = (await _context.ServerRoles
+                    .Where(role => role.ServerId == channel.ServerId)
+                    .Select(role => role.Name)
+                    .ToListAsync())
+                .Select(NormalizeRoleName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var viewRoles = NormalizeRequestedRoleNames(request.ViewAllowedRoleNames, validRoleNames);
+            var sendRoles = NormalizeRequestedRoleNames(request.MessageSendAllowedRoleNames, validRoleNames);
+            var voiceAllowedRoles = NormalizeRequestedRoleNames(request.VoiceAllowedRoleNames, validRoleNames);
+            var stageSpeakerRoles = NormalizeRequestedRoleNames(request.StageSpeakerRoleNames, validRoleNames);
+
+            if (request.ViewAccessRestricted && viewRoles.Length == 0)
+            {
+                return BadRequest(new { Message = "At least one role must be allowed to view this channel." });
+            }
+
+            if (channel.Type == "text" && request.MessageSendRestricted && sendRoles.Length == 0)
+            {
+                return BadRequest(new { Message = "At least one role must be allowed to send messages." });
+            }
+
+            if (IsVoiceLikeChannelType(channel.Type) && request.VoiceAccessRestricted && voiceAllowedRoles.Length == 0)
+            {
+                return BadRequest(new { Message = "At least one role must be allowed to connect." });
+            }
+
+            if (channel.Type == "stage" && request.StageSpeakerRestricted && stageSpeakerRoles.Length == 0)
+            {
+                return BadRequest(new { Message = "At least one role must be allowed to speak on stage." });
+            }
+
+            channel.ViewAccessRestricted = request.ViewAccessRestricted;
+            channel.ViewAllowedRolesJson = request.ViewAccessRestricted
+                ? SerializeRoleNames(viewRoles)
+                : "[]";
+            channel.MessageSendRestricted = channel.Type == "text" && request.MessageSendRestricted;
+            channel.MessageSendAllowedRolesJson = channel.MessageSendRestricted
+                ? SerializeRoleNames(sendRoles)
+                : "[]";
+            channel.VoiceAccessRestricted = IsVoiceLikeChannelType(channel.Type) && request.VoiceAccessRestricted;
+            channel.VoiceAllowedRolesJson = channel.VoiceAccessRestricted
+                ? SerializeRoleNames(voiceAllowedRoles)
+                : "[]";
+            channel.StageSpeakerRestricted = channel.Type == "stage" && request.StageSpeakerRestricted;
+            channel.StageSpeakerRolesJson = channel.StageSpeakerRestricted
+                ? SerializeRoleNames(stageSpeakerRoles)
+                : "[]";
+
+            AddAuditLog(
+                channel.ServerId,
+                "channel_permissions_updated",
+                currentUsername,
+                "channel",
+                channel.Id,
+                details: new
+                {
+                    channel.Name,
+                    channel.Type,
+                    channel.ViewAccessRestricted,
+                    ViewAllowedRoleNames = viewRoles,
+                    channel.MessageSendRestricted,
+                    MessageSendAllowedRoleNames = sendRoles,
+                    channel.VoiceAccessRestricted,
+                    VoiceAllowedRoleNames = voiceAllowedRoles,
+                    channel.StageSpeakerRestricted,
+                    StageSpeakerRoleNames = stageSpeakerRoles
+                });
+            await _context.SaveChangesAsync();
+            return Ok(await BuildChannelPermissionsResponse(channel));
+        }
+
+        [HttpGet]
         public async Task<IActionResult> GetChannelVoicePermissions(string channelId)
         {
             var currentUsername = GetCurrentUsername();
@@ -1176,14 +1649,14 @@ namespace DiscordCloneServer.Controllers
             if (channel == null)
                 return NotFound(new { Message = "Channel not found." });
 
-            if (!await IsServerMember(channel.ServerId, currentUsername))
+            if (!await CanViewChannel(channel, currentUsername))
                 return Forbid();
 
             if (!IsVoiceLikeChannelType(channel.Type))
                 return BadRequest(new { Message = "Permissions are only available for voice and stage channels." });
 
             await EnsureDefaultRoles(channel.ServerId);
-            return Ok(await BuildChannelVoicePermissionsResponse(channel));
+            return Ok(await BuildChannelPermissionsResponse(channel));
         }
 
         [HttpPost]
@@ -1249,7 +1722,7 @@ namespace DiscordCloneServer.Controllers
                     StageSpeakerRoleNames = stageSpeakerRoles
                 });
             await _context.SaveChangesAsync();
-            return Ok(await BuildChannelVoicePermissionsResponse(channel));
+            return Ok(await BuildChannelPermissionsResponse(channel));
         }
 
         [HttpPost]
@@ -1267,7 +1740,9 @@ namespace DiscordCloneServer.Controllers
                 return Forbid();
 
             var messages = await _context.ServerMessages.Where(message => message.ChannelId == channel.Id).ToListAsync();
+            var webhooks = await _context.ServerWebhooks.Where(webhook => webhook.ChannelId == channel.Id).ToListAsync();
             _context.ServerMessages.RemoveRange(messages);
+            _context.ServerWebhooks.RemoveRange(webhooks);
             _context.Channels.Remove(channel);
             AddAuditLog(
                 channel.ServerId,
@@ -1275,7 +1750,7 @@ namespace DiscordCloneServer.Controllers
                 currentUsername,
                 "channel",
                 channel.Id,
-                details: new { channel.Name, channel.Type, MessageCount = messages.Count });
+                details: new { channel.Name, channel.Type, MessageCount = messages.Count, WebhookCount = webhooks.Count });
             await _context.SaveChangesAsync();
             return Ok(new { Message = "Channel deleted." });
         }
@@ -1785,7 +2260,19 @@ namespace DiscordCloneServer.Controllers
             var memberResponses = members
                 .Select(member => BuildMemberResponse(member, member.Username, member.Role, now))
                 .ToList();
-            var usernames = memberResponses.Select(member => member.Username).ToList();
+            var botResponses = await _context.BotAccounts
+                .Where(bot => bot.ServerId == serverId)
+                .Where(bot => query == string.Empty ||
+                              bot.Username.Contains(query) ||
+                              bot.DisplayName.Contains(query))
+                .OrderBy(bot => bot.DisplayName)
+                .Take(50)
+                .ToListAsync();
+            memberResponses.AddRange(botResponses.Select(BuildBotMemberResponse));
+            var usernames = memberResponses
+                .Where(member => !member.IsBot)
+                .Select(member => member.Username)
+                .ToList();
             var accounts = await _context.Accounts
                 .Where(account => usernames.Contains(account.UserName) && !account.IsDisabled)
                 .ToDictionaryAsync(account => account.UserName, StringComparer.OrdinalIgnoreCase);
@@ -1832,6 +2319,8 @@ namespace DiscordCloneServer.Controllers
                 return BadRequest(new { Message = "Role name must be 1-40 characters." });
             if (roleName == "owner")
                 return BadRequest(new { Message = "The owner role is managed automatically." });
+            if (!string.IsNullOrWhiteSpace(request.Color) && !IsValidHexColor(request.Color))
+                return BadRequest(new { Message = "Role color must be a valid hex color." });
 
             var role = !string.IsNullOrWhiteSpace(request.RoleId)
                 ? await _context.ServerRoles.FirstOrDefaultAsync(r => r.Id == request.RoleId && r.ServerId == request.ServerId)
@@ -1850,6 +2339,11 @@ namespace DiscordCloneServer.Controllers
             }
 
             role.Name = roleName;
+            role.Color = !string.IsNullOrWhiteSpace(request.Color)
+                ? request.Color.Trim().ToLowerInvariant()
+                : IsValidHexColor(role.Color)
+                    ? role.Color
+                    : GetDefaultRoleColor(roleName);
             role.CanManageServer = request.CanManageServer;
             role.CanManageChannels = request.CanManageChannels;
             role.CanManageMembers = request.CanManageMembers;
@@ -1867,6 +2361,7 @@ namespace DiscordCloneServer.Controllers
                 details: new
                 {
                     role.Name,
+                    role.Color,
                     role.CanManageServer,
                     role.CanManageChannels,
                     role.CanManageMembers,
@@ -2399,11 +2894,53 @@ namespace DiscordCloneServer.Controllers
             if (rolesToAdd.Any())
             {
                 _context.ServerRoles.AddRange(rolesToAdd);
+            }
+
+            var rolesToBackfill = await _context.ServerRoles
+                .Where(role => role.ServerId == serverId)
+                .ToListAsync();
+            var backfilledRoleColors = false;
+            foreach (var role in rolesToBackfill)
+            {
+                if (!IsValidHexColor(role.Color))
+                {
+                    role.Color = GetDefaultRoleColor(role.Name);
+                    backfilledRoleColors = true;
+                }
+            }
+
+            if (rolesToAdd.Any() || backfilledRoleColors)
+            {
                 await _context.SaveChangesAsync();
             }
         }
 
-        private async Task<object> BuildChannelVoicePermissionsResponse(Channel channel)
+        private async Task<(CreateServer? Server, ServerMember? Member, ServerRole? Role)> GetChannelPermissionContext(
+            string serverId,
+            string username)
+        {
+            var server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == serverId);
+            var member = await _context.ServerMembers.FirstOrDefaultAsync(m =>
+                m.ServerId == serverId && m.Username == username);
+            ServerRole? role = null;
+            if (member != null)
+            {
+                await EnsureDefaultRoles(serverId);
+                var roleName = NormalizeRoleName(member.Role);
+                role = await _context.ServerRoles.FirstOrDefaultAsync(r =>
+                    r.ServerId == serverId && r.Name == roleName);
+            }
+
+            return (server, member, role);
+        }
+
+        private async Task<bool> CanViewChannel(Channel channel, string username)
+        {
+            var (server, member, role) = await GetChannelPermissionContext(channel.ServerId, username);
+            return ChannelPermissionPolicy.CanViewChannel(channel, server, member, role, username);
+        }
+
+        private async Task<object> BuildChannelPermissionsResponse(Channel channel)
         {
             var roles = await _context.ServerRoles
                 .Where(role => role.ServerId == channel.ServerId)
@@ -2417,6 +2954,10 @@ namespace DiscordCloneServer.Controllers
                 channel.ServerId,
                 channel.Name,
                 channel.Type,
+                channel.ViewAccessRestricted,
+                ViewAllowedRoleNames = DeserializeRoleNames(channel.ViewAllowedRolesJson),
+                channel.MessageSendRestricted,
+                MessageSendAllowedRoleNames = DeserializeRoleNames(channel.MessageSendAllowedRolesJson),
                 channel.VoiceAccessRestricted,
                 VoiceAllowedRoleNames = DeserializeRoleNames(channel.VoiceAllowedRolesJson),
                 channel.StageSpeakerRestricted,
@@ -2425,7 +2966,11 @@ namespace DiscordCloneServer.Controllers
                 {
                     role.Id,
                     Name = NormalizeRoleName(role.Name),
+                    role.Color,
                     role.Position,
+                    role.CanManageServer,
+                    role.CanManageChannels,
+                    role.CanSendMessages,
                     role.CanJoinVoice
                 })
             };
@@ -2614,6 +3159,46 @@ namespace DiscordCloneServer.Controllers
                 .ToArray());
         }
 
+        private static string? NormalizeOptionalMediaUrl(string? value)
+        {
+            var normalized = value?.Trim();
+            return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+        }
+
+        private static bool IsValidServerMediaUrl(string? url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                return true;
+            }
+
+            if (url.Length > 2048)
+            {
+                return false;
+            }
+
+            if (url.StartsWith("/uploads/", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            return Uri.TryCreate(url, UriKind.Absolute, out var parsedUrl) &&
+                   (parsedUrl.Scheme == Uri.UriSchemeHttp || parsedUrl.Scheme == Uri.UriSchemeHttps);
+        }
+
+        private static bool IsValidHexColor(string? color)
+        {
+            if (string.IsNullOrWhiteSpace(color))
+            {
+                return false;
+            }
+
+            var normalized = color.Trim();
+            return normalized.Length == 7 &&
+                   normalized[0] == '#' &&
+                   normalized.Skip(1).All(Uri.IsHexDigit);
+        }
+
         private static bool IsValidServerName(string name)
         {
             return name.Length is >= 1 and <= 100;
@@ -2683,6 +3268,19 @@ namespace DiscordCloneServer.Controllers
         public string[] StageSpeakerRoleNames { get; set; } = Array.Empty<string>();
     }
 
+    public class ChannelPermissionsRequest
+    {
+        public string ChannelId { get; set; } = string.Empty;
+        public bool ViewAccessRestricted { get; set; }
+        public string[] ViewAllowedRoleNames { get; set; } = Array.Empty<string>();
+        public bool MessageSendRestricted { get; set; }
+        public string[] MessageSendAllowedRoleNames { get; set; } = Array.Empty<string>();
+        public bool VoiceAccessRestricted { get; set; }
+        public string[] VoiceAllowedRoleNames { get; set; } = Array.Empty<string>();
+        public bool StageSpeakerRestricted { get; set; }
+        public string[] StageSpeakerRoleNames { get; set; } = Array.Empty<string>();
+    }
+
     public class CategoryMutationRequest
     {
         public string? CategoryId { get; set; }
@@ -2707,6 +3305,13 @@ namespace DiscordCloneServer.Controllers
         public string? Description { get; set; }
         public string? DiscoveryCategory { get; set; }
         public string[]? DiscoveryTags { get; set; }
+    }
+
+    public class ServerAppearanceRequest
+    {
+        public string ServerId { get; set; } = string.Empty;
+        public string? ServerIconUrl { get; set; }
+        public string? ServerBannerUrl { get; set; }
     }
 
     public class ServerWelcomeRequest
@@ -2753,6 +3358,7 @@ namespace DiscordCloneServer.Controllers
         public string? RoleId { get; set; }
         public string ServerId { get; set; } = string.Empty;
         public string Name { get; set; } = string.Empty;
+        public string? Color { get; set; }
         public bool CanManageServer { get; set; }
         public bool CanManageChannels { get; set; }
         public bool CanManageMembers { get; set; }
