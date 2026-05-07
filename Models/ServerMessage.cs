@@ -19,6 +19,12 @@ namespace DiscordCloneServer.Models
         public bool IsPinned { get; set; }
         public string? PinnedBy { get; set; }
         public DateTime? PinnedAt { get; set; }
+        public bool IsBot { get; set; }
+        public string? BotAccountId { get; set; }
+        public bool IsWebhook { get; set; }
+        public string? WebhookId { get; set; }
+        public string? SenderDisplayName { get; set; }
+        public string? SenderAvatarUrl { get; set; }
         [NotMapped]
         public MessagePollDraft? Poll { get; set; }
     }
