@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
 
 public class CreateServer
 {
@@ -13,6 +14,8 @@ public class CreateServer
     public string? InviteLink { get; set; }
     public DateTime? Date { get; set; }
     public string? Description { get; set; }
+    public string? ServerIconUrl { get; set; }
+    public string? ServerBannerUrl { get; set; }
     public bool IsPublic { get; set; }
     public string? DiscoveryCategory { get; set; }
     public string? DiscoveryTagsJson { get; set; }
@@ -24,4 +27,7 @@ public class CreateServer
     public int MinimumAccountAgeMinutes { get; set; }
     public int MinimumMembershipMinutes { get; set; }
     public bool RequireTwoFactorForModerators { get; set; }
+
+    [NotMapped]
+    public string? TemplateId { get; set; }
 }
