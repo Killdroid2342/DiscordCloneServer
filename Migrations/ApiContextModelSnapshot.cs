@@ -729,6 +729,45 @@ namespace DiscordCloneServer.Migrations
                     b.ToTable("Server_Bans", (string)null);
                 });
 
+            modelBuilder.Entity("DiscordCloneServer.Models.ServerEmoji", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("ImageUrl")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("ServerId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ServerId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("Server_Emojis", (string)null);
+                });
+
             modelBuilder.Entity("DiscordCloneServer.Models.ServerInvite", b =>
                 {
                     b.Property<string>("Id")
@@ -901,6 +940,45 @@ namespace DiscordCloneServer.Migrations
                         .IsUnique();
 
                     b.ToTable("Server_Roles", (string)null);
+                });
+
+            modelBuilder.Entity("DiscordCloneServer.Models.ServerSticker", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("ImageUrl")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("nvarchar(2048)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("ServerId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ServerId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("Server_Stickers", (string)null);
                 });
 
             modelBuilder.Entity("DiscordCloneServer.Models.ServerThread", b =>
