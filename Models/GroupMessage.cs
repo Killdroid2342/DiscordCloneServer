@@ -1,5 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace DiscordCloneServer.Models
 {
     public class GroupMessage
@@ -14,5 +16,7 @@ namespace DiscordCloneServer.Models
         public string? AttachmentUrl { get; set; }
         public string? AttachmentContentType { get; set; }
         public DateTime? EditedAt { get; set; }
+        [NotMapped]
+        public MessagePollDraft? Poll { get; set; }
     }
 }

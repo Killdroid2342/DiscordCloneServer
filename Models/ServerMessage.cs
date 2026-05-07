@@ -1,5 +1,7 @@
 ﻿using System.ComponentModel.DataAnnotations;
 
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace DiscordCloneServer.Models
 {
     public class ServerMessage
@@ -17,5 +19,7 @@ namespace DiscordCloneServer.Models
         public bool IsPinned { get; set; }
         public string? PinnedBy { get; set; }
         public DateTime? PinnedAt { get; set; }
+        [NotMapped]
+        public MessagePollDraft? Poll { get; set; }
     }
 }
