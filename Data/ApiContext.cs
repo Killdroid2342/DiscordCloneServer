@@ -31,6 +31,14 @@ namespace DiscordCloneServer.Data
         public DbSet<ContactVerification> ContactVerifications { get; set; }
         public DbSet<ServerAuditLog> ServerAuditLogs { get; set; }
         public DbSet<UserReport> UserReports { get; set; }
+        public DbSet<BotAccount> BotAccounts { get; set; }
+        public DbSet<ServerWebhook> ServerWebhooks { get; set; }
+        public DbSet<SlashCommand> SlashCommands { get; set; }
+        public DbSet<SlashCommandInteraction> SlashCommandInteractions { get; set; }
+        public DbSet<OAuthApplication> OAuthApplications { get; set; }
+        public DbSet<OAuthAppAuthorization> OAuthAppAuthorizations { get; set; }
+        public DbSet<OAuthAuthorizationCode> OAuthAuthorizationCodes { get; set; }
+        public DbSet<OAuthAccessToken> OAuthAccessTokens { get; set; }
 
         public ApiContext(DbContextOptions<ApiContext> options)
             : base(options)
@@ -171,6 +179,12 @@ namespace DiscordCloneServer.Data
                 .Property(server => server.DiscoveryTagsJson)
                 .HasColumnType("nvarchar(max)");
             modelBuilder.Entity<CreateServer>()
+                .Property(server => server.ServerIconUrl)
+                .HasMaxLength(2048);
+            modelBuilder.Entity<CreateServer>()
+                .Property(server => server.ServerBannerUrl)
+                .HasMaxLength(2048);
+            modelBuilder.Entity<CreateServer>()
                 .Property(server => server.WelcomeEnabled)
                 .HasDefaultValue(true);
             modelBuilder.Entity<CreateServer>()
@@ -200,6 +214,18 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<ServerMessage>()
                 .Property(message => message.PinnedBy)
                 .HasMaxLength(256);
+            modelBuilder.Entity<ServerMessage>()
+                .Property(message => message.BotAccountId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerMessage>()
+                .Property(message => message.WebhookId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerMessage>()
+                .Property(message => message.SenderDisplayName)
+                .HasMaxLength(80);
+            modelBuilder.Entity<ServerMessage>()
+                .Property(message => message.SenderAvatarUrl)
+                .HasMaxLength(2048);
             modelBuilder.Entity<ServerThread>().ToTable("Server_Threads");
             modelBuilder.Entity<ServerThread>()
                 .Property(thread => thread.ServerId)
@@ -240,6 +266,20 @@ namespace DiscordCloneServer.Data
                 .HasColumnType("datetime2");
             modelBuilder.Entity<Channel>().ToTable("Channels");
             modelBuilder.Entity<Channel>()
+                .Property(channel => channel.ViewAccessRestricted)
+                .HasDefaultValue(false);
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.ViewAllowedRolesJson)
+                .HasColumnType("nvarchar(max)")
+                .HasDefaultValue("[]");
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.MessageSendRestricted)
+                .HasDefaultValue(false);
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.MessageSendAllowedRolesJson)
+                .HasColumnType("nvarchar(max)")
+                .HasDefaultValue("[]");
+            modelBuilder.Entity<Channel>()
                 .Property(channel => channel.VoiceAccessRestricted)
                 .HasDefaultValue(false);
             modelBuilder.Entity<Channel>()
@@ -255,6 +295,10 @@ namespace DiscordCloneServer.Data
                 .HasDefaultValue("[]");
             modelBuilder.Entity<Category>().ToTable("Categories");
             modelBuilder.Entity<ServerRole>().ToTable("Server_Roles");
+            modelBuilder.Entity<ServerRole>()
+                .Property(role => role.Color)
+                .HasMaxLength(16)
+                .HasDefaultValue("#949ba4");
             modelBuilder.Entity<ServerRole>()
                 .HasIndex(role => new { role.ServerId, role.Name })
                 .IsUnique();
@@ -433,6 +477,212 @@ namespace DiscordCloneServer.Data
                 .HasIndex(report => new { report.ServerId, report.Status, report.CreatedAt });
             modelBuilder.Entity<UserReport>()
                 .HasIndex(report => new { report.ReportedByUsername, report.CreatedAt });
+
+            modelBuilder.Entity<BotAccount>().ToTable("Bot_Accounts");
+            modelBuilder.Entity<BotAccount>()
+                .Property(bot => bot.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<BotAccount>()
+                .Property(bot => bot.Username)
+                .HasMaxLength(80);
+            modelBuilder.Entity<BotAccount>()
+                .Property(bot => bot.DisplayName)
+                .HasMaxLength(80);
+            modelBuilder.Entity<BotAccount>()
+                .Property(bot => bot.AvatarUrl)
+                .HasMaxLength(2048);
+            modelBuilder.Entity<BotAccount>()
+                .Property(bot => bot.Description)
+                .HasMaxLength(240);
+            modelBuilder.Entity<BotAccount>()
+                .Property(bot => bot.Role)
+                .HasMaxLength(40);
+            modelBuilder.Entity<BotAccount>()
+                .Property(bot => bot.TokenHash)
+                .HasMaxLength(128);
+            modelBuilder.Entity<BotAccount>()
+                .Property(bot => bot.CreatedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<BotAccount>()
+                .HasIndex(bot => new { bot.ServerId, bot.Username })
+                .IsUnique();
+
+            modelBuilder.Entity<ServerWebhook>().ToTable("Server_Webhooks");
+            modelBuilder.Entity<ServerWebhook>()
+                .Property(webhook => webhook.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerWebhook>()
+                .Property(webhook => webhook.ChannelId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerWebhook>()
+                .Property(webhook => webhook.Name)
+                .HasMaxLength(80);
+            modelBuilder.Entity<ServerWebhook>()
+                .Property(webhook => webhook.AvatarUrl)
+                .HasMaxLength(2048);
+            modelBuilder.Entity<ServerWebhook>()
+                .Property(webhook => webhook.TokenHash)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerWebhook>()
+                .Property(webhook => webhook.CreatedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerWebhook>()
+                .HasIndex(webhook => new { webhook.ServerId, webhook.ChannelId });
+
+            modelBuilder.Entity<SlashCommand>().ToTable("Slash_Commands");
+            modelBuilder.Entity<SlashCommand>()
+                .Property(command => command.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<SlashCommand>()
+                .Property(command => command.BotAccountId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<SlashCommand>()
+                .Property(command => command.Name)
+                .HasMaxLength(32);
+            modelBuilder.Entity<SlashCommand>()
+                .Property(command => command.Description)
+                .HasMaxLength(120);
+            modelBuilder.Entity<SlashCommand>()
+                .Property(command => command.Usage)
+                .HasMaxLength(120);
+            modelBuilder.Entity<SlashCommand>()
+                .Property(command => command.CreatedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<SlashCommand>()
+                .HasIndex(command => new { command.ServerId, command.Name })
+                .IsUnique();
+            modelBuilder.Entity<SlashCommand>()
+                .HasIndex(command => new { command.BotAccountId, command.IsEnabled });
+
+            modelBuilder.Entity<SlashCommandInteraction>().ToTable("Slash_Command_Interactions");
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .Property(interaction => interaction.SlashCommandId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .Property(interaction => interaction.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .Property(interaction => interaction.ChannelId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .Property(interaction => interaction.BotAccountId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .Property(interaction => interaction.CommandName)
+                .HasMaxLength(32);
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .Property(interaction => interaction.InvokedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .Property(interaction => interaction.Arguments)
+                .HasMaxLength(2000);
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .Property(interaction => interaction.ResponseMessageId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .Property(interaction => interaction.Status)
+                .HasMaxLength(32);
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .HasIndex(interaction => new { interaction.BotAccountId, interaction.Status, interaction.CreatedAt });
+            modelBuilder.Entity<SlashCommandInteraction>()
+                .HasIndex(interaction => new { interaction.ServerId, interaction.ChannelId, interaction.CreatedAt });
+
+            modelBuilder.Entity<OAuthApplication>().ToTable("OAuth_Applications");
+            modelBuilder.Entity<OAuthApplication>()
+                .Property(application => application.Name)
+                .HasMaxLength(80);
+            modelBuilder.Entity<OAuthApplication>()
+                .Property(application => application.Description)
+                .HasMaxLength(240);
+            modelBuilder.Entity<OAuthApplication>()
+                .Property(application => application.IconUrl)
+                .HasMaxLength(2048);
+            modelBuilder.Entity<OAuthApplication>()
+                .Property(application => application.OwnerUsername)
+                .HasMaxLength(256);
+            modelBuilder.Entity<OAuthApplication>()
+                .Property(application => application.ClientSecretHash)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthApplication>()
+                .Property(application => application.RedirectUrisJson)
+                .HasColumnType("nvarchar(max)");
+            modelBuilder.Entity<OAuthApplication>()
+                .Property(application => application.AllowedScopesJson)
+                .HasColumnType("nvarchar(max)");
+            modelBuilder.Entity<OAuthApplication>()
+                .Property(application => application.BotAccountId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthApplication>()
+                .HasIndex(application => application.OwnerUsername);
+
+            modelBuilder.Entity<OAuthAppAuthorization>().ToTable("OAuth_App_Authorizations");
+            modelBuilder.Entity<OAuthAppAuthorization>()
+                .Property(authorization => authorization.ApplicationId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAppAuthorization>()
+                .Property(authorization => authorization.Username)
+                .HasMaxLength(256);
+            modelBuilder.Entity<OAuthAppAuthorization>()
+                .Property(authorization => authorization.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAppAuthorization>()
+                .Property(authorization => authorization.ScopesJson)
+                .HasColumnType("nvarchar(max)");
+            modelBuilder.Entity<OAuthAppAuthorization>()
+                .HasIndex(authorization => new { authorization.ApplicationId, authorization.Username, authorization.ServerId });
+
+            modelBuilder.Entity<OAuthAuthorizationCode>().ToTable("OAuth_Authorization_Codes");
+            modelBuilder.Entity<OAuthAuthorizationCode>()
+                .Property(code => code.ApplicationId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAuthorizationCode>()
+                .Property(code => code.AuthorizationId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAuthorizationCode>()
+                .Property(code => code.Username)
+                .HasMaxLength(256);
+            modelBuilder.Entity<OAuthAuthorizationCode>()
+                .Property(code => code.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAuthorizationCode>()
+                .Property(code => code.CodeHash)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAuthorizationCode>()
+                .Property(code => code.RedirectUri)
+                .HasMaxLength(2048);
+            modelBuilder.Entity<OAuthAuthorizationCode>()
+                .Property(code => code.ScopesJson)
+                .HasColumnType("nvarchar(max)");
+            modelBuilder.Entity<OAuthAuthorizationCode>()
+                .HasIndex(code => code.CodeHash)
+                .IsUnique();
+            modelBuilder.Entity<OAuthAuthorizationCode>()
+                .HasIndex(code => new { code.ApplicationId, code.ExpiresAt });
+
+            modelBuilder.Entity<OAuthAccessToken>().ToTable("OAuth_Access_Tokens");
+            modelBuilder.Entity<OAuthAccessToken>()
+                .Property(token => token.ApplicationId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAccessToken>()
+                .Property(token => token.AuthorizationId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAccessToken>()
+                .Property(token => token.Username)
+                .HasMaxLength(256);
+            modelBuilder.Entity<OAuthAccessToken>()
+                .Property(token => token.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAccessToken>()
+                .Property(token => token.TokenHash)
+                .HasMaxLength(128);
+            modelBuilder.Entity<OAuthAccessToken>()
+                .Property(token => token.ScopesJson)
+                .HasColumnType("nvarchar(max)");
+            modelBuilder.Entity<OAuthAccessToken>()
+                .HasIndex(token => token.TokenHash)
+                .IsUnique();
+            modelBuilder.Entity<OAuthAccessToken>()
+                .HasIndex(token => new { token.ApplicationId, token.Username, token.ExpiresAt });
 
             base.OnModelCreating(modelBuilder);
             Console.WriteLine("database ready");

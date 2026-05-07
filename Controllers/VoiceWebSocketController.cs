@@ -248,13 +248,7 @@ namespace DiscordCloneServer.Controllers
                 return false;
             }
 
-            if (channel is { VoiceAccessRestricted: true })
-            {
-                var allowedRoles = DeserializeRoleNames(channel.VoiceAllowedRolesJson);
-                return allowedRoles.Contains(roleName, StringComparer.OrdinalIgnoreCase);
-            }
-
-            return true;
+            return ChannelPermissionPolicy.CanJoinVoice(channel, server, member, role, username);
         }
 
         private static bool IsMemberTimedOut(ServerMember member, DateTime now)

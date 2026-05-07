@@ -8,6 +8,7 @@ namespace DiscordCloneServer.Models
         public string Id { get; set; } = Guid.NewGuid().ToString();
         public string ServerId { get; set; } = string.Empty;
         public string Name { get; set; } = "member";
+        public string Color { get; set; } = "#949ba4";
         public int Position { get; set; }
         public bool CanManageServer { get; set; }
         public bool CanManageChannels { get; set; }
