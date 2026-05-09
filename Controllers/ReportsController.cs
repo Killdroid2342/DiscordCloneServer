@@ -81,6 +81,11 @@ namespace DiscordCloneServer.Controllers
             if (validation != null)
                 return validation;
 
+            if (request.BlockTarget && !string.IsNullOrWhiteSpace(report.TargetUsername))
+            {
+                report.ReporterBlockedTarget = await BlockTargetForReporter(currentUsername, report.TargetUsername);
+            }
+
             _context.UserReports.Add(report);
             await _context.SaveChangesAsync();
 
@@ -139,6 +144,67 @@ namespace DiscordCloneServer.Controllers
             return Ok(reports.Select(BuildReportResponse));
         }
 
+        [HttpGet]
+        public async Task<IActionResult> GetServerModerationQueue(string serverId, string? status = "open", int take = 50)
+        {
+            var currentUsername = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(currentUsername))
+                return Unauthorized(new { message = "Missing user identity." });
+
+            serverId = serverId?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(serverId))
+                return BadRequest(new { message = "Server id is required." });
+
+            if (!await CanReviewServerReports(serverId, currentUsername))
+                return Forbid();
+
+            var normalizedStatus = NormalizeStatus(status, allowAll: true);
+            if (normalizedStatus == null)
+                return BadRequest(new { message = "Report status is invalid." });
+
+            take = Math.Clamp(take, 1, 100);
+            var query = _context.UserReports
+                .Where(report => report.ServerId == serverId && report.TargetUsername != null);
+
+            if (normalizedStatus != "all")
+            {
+                query = query.Where(report => report.Status == normalizedStatus);
+            }
+
+            var reports = await query
+                .OrderByDescending(report => report.CreatedAt)
+                .Take(500)
+                .ToListAsync();
+
+            var targetUsernames = reports
+                .Select(report => report.TargetUsername!)
+                .Where(username => !string.IsNullOrWhiteSpace(username))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var members = await _context.ServerMembers
+                .Where(member => member.ServerId == serverId && targetUsernames.Contains(member.Username))
+                .ToListAsync();
+            var bans = await _context.ServerBans
+                .Where(ban => ban.ServerId == serverId && targetUsernames.Contains(ban.Username))
+                .ToListAsync();
+
+            var queue = reports
+                .Where(report => !string.IsNullOrWhiteSpace(report.TargetUsername))
+                .GroupBy(report => report.TargetUsername!, StringComparer.OrdinalIgnoreCase)
+                .Select(group => BuildModerationQueueResponse(
+                    serverId,
+                    group,
+                    members.Where(member => IsSameUsername(member.Username, group.Key)),
+                    bans.FirstOrDefault(ban => IsSameUsername(ban.Username, group.Key))))
+                .OrderByDescending(item => item.OpenReportCount)
+                .ThenByDescending(item => item.BlockSignalCount)
+                .ThenByDescending(item => item.LastReportedAt)
+                .Take(take)
+                .ToList();
+
+            return Ok(queue);
+        }
+
         [HttpPost]
         public async Task<IActionResult> UpdateReportStatus([FromBody] ReportStatusUpdateRequest request)
         {
@@ -190,6 +256,75 @@ namespace DiscordCloneServer.Controllers
 
             await _context.SaveChangesAsync();
             return Ok(BuildReportResponse(report));
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> UpdateReportQueueStatus([FromBody] ReportQueueStatusUpdateRequest request)
+        {
+            var currentUsername = User.GetUsername();
+            if (string.IsNullOrWhiteSpace(currentUsername))
+                return Unauthorized(new { message = "Missing user identity." });
+
+            var serverId = request.ServerId?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(serverId))
+                return BadRequest(new { message = "Server id is required." });
+
+            if (!await CanReviewServerReports(serverId, currentUsername))
+                return Forbid();
+
+            var targetUsername = request.TargetUsername?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(targetUsername))
+                return BadRequest(new { message = "Target username is required." });
+
+            var nextStatus = NormalizeStatus(request.Status, allowAll: false);
+            if (nextStatus == null)
+                return BadRequest(new { message = "Report status is invalid." });
+
+            var note = NormalizeOptional(request.ResolutionNote);
+            if (note?.Length > 1000)
+                return BadRequest(new { message = "Resolution note must be 1000 characters or less." });
+
+            var reports = await _context.UserReports
+                .Where(report => report.ServerId == serverId &&
+                                 report.TargetUsername == targetUsername &&
+                                 (request.IncludeClosed ||
+                                  report.Status == "open" ||
+                                  report.Status == "reviewed"))
+                .ToListAsync();
+
+            if (!reports.Any())
+                return NotFound(new { message = "No queue reports found for this user." });
+
+            foreach (var report in reports)
+            {
+                report.Status = nextStatus;
+                report.ReviewedByUsername = currentUsername;
+                report.ReviewedAt = DateTime.UtcNow;
+                report.ResolutionNote = note;
+            }
+
+            AddAuditLog(
+                serverId,
+                "report_queue_status_updated",
+                currentUsername,
+                "member",
+                targetUsername,
+                targetUsername,
+                new
+                {
+                    CurrentStatus = nextStatus,
+                    ReportCount = reports.Count,
+                    Reason = note
+                });
+
+            await _context.SaveChangesAsync();
+            return Ok(new
+            {
+                message = "Queue updated.",
+                targetUsername,
+                status = nextStatus,
+                updatedCount = reports.Count
+            });
         }
 
         private async Task<IActionResult?> PopulateMessageReport(
@@ -392,6 +527,32 @@ namespace DiscordCloneServer.Controllers
             return group?.Members.Any(member => string.Equals(member, username, StringComparison.OrdinalIgnoreCase)) == true;
         }
 
+        private async Task<bool> BlockTargetForReporter(string reporterUsername, string targetUsername)
+        {
+            if (IsSameUsername(reporterUsername, targetUsername))
+            {
+                return false;
+            }
+
+            var reporter = await _context.Accounts.FirstOrDefaultAsync(account =>
+                account.UserName == reporterUsername && !account.IsDisabled);
+            var target = await _context.Accounts.FirstOrDefaultAsync(account =>
+                account.UserName == targetUsername && !account.IsDisabled);
+            if (reporter == null || target == null)
+            {
+                return false;
+            }
+
+            reporter.BlockedUsers = AddUnique(reporter.BlockedUsers, targetUsername);
+            reporter.Friends = RemoveValue(reporter.Friends, targetUsername);
+            target.Friends = RemoveValue(target.Friends, reporterUsername);
+            reporter.IncomingFriendRequests = RemoveValue(reporter.IncomingFriendRequests, targetUsername);
+            reporter.OutgoingFriendRequests = RemoveValue(reporter.OutgoingFriendRequests, targetUsername);
+            target.IncomingFriendRequests = RemoveValue(target.IncomingFriendRequests, reporterUsername);
+            target.OutgoingFriendRequests = RemoveValue(target.OutgoingFriendRequests, reporterUsername);
+            return true;
+        }
+
         private void AddAuditLog(
             string serverId,
             string actionType,
@@ -431,11 +592,104 @@ namespace DiscordCloneServer.Controllers
                 report.Reason,
                 report.Description,
                 report.MessagePreview,
+                report.ReporterBlockedTarget,
                 report.Status,
                 report.CreatedAt,
                 report.ReviewedByUsername,
                 report.ReviewedAt,
                 report.ResolutionNote
+            };
+        }
+
+        private sealed class ModerationQueueResponse
+        {
+            public string ServerId { get; set; } = string.Empty;
+            public string TargetUsername { get; set; } = string.Empty;
+            public int ReportCount { get; set; }
+            public int OpenReportCount { get; set; }
+            public int ReviewedReportCount { get; set; }
+            public int ResolvedReportCount { get; set; }
+            public int DismissedReportCount { get; set; }
+            public int BlockSignalCount { get; set; }
+            public int MessageReportCount { get; set; }
+            public int UserReportCount { get; set; }
+            public string[] Reasons { get; set; } = Array.Empty<string>();
+            public string[] Reporters { get; set; } = Array.Empty<string>();
+            public DateTime FirstReportedAt { get; set; }
+            public DateTime LastReportedAt { get; set; }
+            public bool IsMember { get; set; }
+            public string? Role { get; set; }
+            public bool IsMuted { get; set; }
+            public DateTime? MutedUntil { get; set; }
+            public bool IsTimedOut { get; set; }
+            public DateTime? TimedOutUntil { get; set; }
+            public bool IsBanned { get; set; }
+            public string? BanReason { get; set; }
+            public DateTime? BannedAt { get; set; }
+            public IEnumerable<object> Reports { get; set; } = Array.Empty<object>();
+        }
+
+        private static ModerationQueueResponse BuildModerationQueueResponse(
+            string serverId,
+            IEnumerable<UserReport> reportGroup,
+            IEnumerable<ServerMember> memberships,
+            ServerBan? ban)
+        {
+            var reports = reportGroup
+                .OrderByDescending(report => report.CreatedAt)
+                .ToList();
+            var memberList = memberships.ToList();
+            var now = DateTime.UtcNow;
+            var activeMuteUntil = memberList
+                .Where(member => member.IsMuted && (member.MutedUntil == null || member.MutedUntil > now))
+                .Select(member => member.MutedUntil)
+                .OrderByDescending(value => value ?? DateTime.MaxValue)
+                .FirstOrDefault();
+            var activeTimeoutUntil = memberList
+                .Where(member => member.TimedOutUntil != null && member.TimedOutUntil > now)
+                .Select(member => member.TimedOutUntil)
+                .OrderByDescending(value => value)
+                .FirstOrDefault();
+
+            return new ModerationQueueResponse
+            {
+                ServerId = serverId,
+                TargetUsername = reports.First().TargetUsername ?? string.Empty,
+                ReportCount = reports.Count,
+                OpenReportCount = reports.Count(report => report.Status == "open"),
+                ReviewedReportCount = reports.Count(report => report.Status == "reviewed"),
+                ResolvedReportCount = reports.Count(report => report.Status == "resolved"),
+                DismissedReportCount = reports.Count(report => report.Status == "dismissed"),
+                BlockSignalCount = reports.Count(report => report.ReporterBlockedTarget),
+                MessageReportCount = reports.Count(report => report.TargetType == "message"),
+                UserReportCount = reports.Count(report => report.TargetType == "user"),
+                Reasons = reports
+                    .Select(report => report.Reason)
+                    .Where(reason => !string.IsNullOrWhiteSpace(reason))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(6)
+                    .ToArray(),
+                Reporters = reports
+                    .Select(report => report.ReportedByUsername)
+                    .Where(reporter => !string.IsNullOrWhiteSpace(reporter))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(8)
+                    .ToArray(),
+                FirstReportedAt = reports.Min(report => report.CreatedAt),
+                LastReportedAt = reports.Max(report => report.CreatedAt),
+                IsMember = memberList.Any(),
+                Role = memberList
+                    .OrderBy(member => NormalizeRoleName(member.Role) == "owner" ? 0 : 1)
+                    .Select(member => member.Role)
+                    .FirstOrDefault(),
+                IsMuted = activeMuteUntil != null || memberList.Any(member => member.IsMuted && member.MutedUntil == null),
+                MutedUntil = activeMuteUntil,
+                IsTimedOut = activeTimeoutUntil != null,
+                TimedOutUntil = activeTimeoutUntil,
+                IsBanned = ban != null,
+                BanReason = ban?.Reason,
+                BannedAt = ban?.CreatedAt,
+                Reports = reports.Take(5).Select(BuildReportResponse).ToList()
             };
         }
 
@@ -501,6 +755,23 @@ namespace DiscordCloneServer.Controllers
 
             return normalized.Length <= 500 ? normalized : normalized[..500];
         }
+
+        private static string[] AddUnique(string[]? values, string value)
+        {
+            var normalized = value.Trim();
+            return (values ?? Array.Empty<string>())
+                .Append(normalized)
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static string[] RemoveValue(string[]? values, string value)
+        {
+            return (values ?? Array.Empty<string>())
+                .Where(item => !string.Equals(item, value, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+        }
     }
 
     public class ReportCreateRequest
@@ -514,6 +785,7 @@ namespace DiscordCloneServer.Controllers
         public string? TargetUsername { get; set; }
         public string Reason { get; set; } = string.Empty;
         public string? Description { get; set; }
+        public bool BlockTarget { get; set; }
     }
 
     public class ReportStatusUpdateRequest
@@ -522,5 +794,14 @@ namespace DiscordCloneServer.Controllers
         public string ReportId { get; set; } = string.Empty;
         public string Status { get; set; } = "reviewed";
         public string? ResolutionNote { get; set; }
+    }
+
+    public class ReportQueueStatusUpdateRequest
+    {
+        public string ServerId { get; set; } = string.Empty;
+        public string TargetUsername { get; set; } = string.Empty;
+        public string Status { get; set; } = "reviewed";
+        public string? ResolutionNote { get; set; }
+        public bool IncludeClosed { get; set; }
     }
 }
