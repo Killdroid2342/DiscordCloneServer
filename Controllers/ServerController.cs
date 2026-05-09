@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
 using DiscordCloneServer.Data;
@@ -9,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Caching.Memory;
 
 using DiscordCloneServer.Hubs;
 using DiscordCloneServer.Services;
@@ -38,6 +40,9 @@ namespace DiscordCloneServer.Controllers
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
         private readonly IHubContext<ChatHub> _hubContext;
+        private readonly IMemoryCache? _cache;
+        private readonly IInviteAbuseDetectionService? _inviteAbuseDetectionService;
+        private readonly TimeSpan _publicDiscoveryCacheDuration;
         private const int MaxModerationDurationMinutes = 60 * 24 * 28;
         private const int MaxDiscoveryTags = 8;
         private const int MaxDiscoveryTagLength = 32;
@@ -45,6 +50,7 @@ namespace DiscordCloneServer.Controllers
         private const int MaxWelcomeChecklistItems = 6;
         private const int MaxWelcomeChecklistItemLength = 120;
         private const int MaxProfileBadgeCount = 6;
+        private static long _publicDiscoveryCacheVersion;
         private static readonly HashSet<string> ProfileBadgeIds = new(StringComparer.OrdinalIgnoreCase)
         {
             "early-member",
@@ -66,6 +72,16 @@ namespace DiscordCloneServer.Controllers
             string DiscoveryCategory,
             string[] WelcomeChecklist,
             IReadOnlyList<ServerTemplateCategoryDefinition> Categories);
+        private sealed record PublicServerDiscoveryCacheItem(
+            IReadOnlyList<CreateServer> Servers,
+            Dictionary<string, int> MemberCounts,
+            Dictionary<string, int> ChannelCounts);
+        private sealed record NormalizedAutoModRule(
+            string Name,
+            string TriggerType,
+            string TriggerValue,
+            string ActionType,
+            bool IsEnabled);
 
         private static readonly ServerTemplateDefinition[] ServerTemplates =
         {
@@ -201,11 +217,22 @@ namespace DiscordCloneServer.Controllers
                 })
         };
 
-        public ServerController(ApiContext context, IConfiguration config, IHubContext<ChatHub> hubContext)
+        public ServerController(
+            ApiContext context,
+            IConfiguration config,
+            IHubContext<ChatHub> hubContext,
+            IMemoryCache? cache = null,
+            IInviteAbuseDetectionService? inviteAbuseDetectionService = null)
         {
             _context = context;
             _config = config;
             _hubContext = hubContext;
+            _cache = cache;
+            _inviteAbuseDetectionService = inviteAbuseDetectionService;
+            _publicDiscoveryCacheDuration = TimeSpan.FromSeconds(Math.Clamp(
+                config.GetValue<int?>("Caching:PublicServerDiscoverySeconds") ?? 30,
+                0,
+                300));
         }
 
         private static object BuildServerResponse(
@@ -265,6 +292,100 @@ namespace DiscordCloneServer.Controllers
                 VerificationLevel = ServerVerificationPolicy.NormalizeLevel(server.VerificationLevel),
                 RequireVerifiedEmail = server.RequireVerifiedEmail
             };
+        }
+
+        private static object BuildAutoModRuleResponse(ServerAutoModRule rule)
+        {
+            return new
+            {
+                rule.Id,
+                rule.ServerId,
+                rule.Name,
+                TriggerType = AutoModService.NormalizeTriggerType(rule.TriggerType),
+                rule.TriggerValue,
+                ActionType = AutoModService.NormalizeActionType(rule.ActionType),
+                rule.IsEnabled,
+                rule.CreatedBy,
+                rule.CreatedAt,
+                rule.UpdatedAt,
+                rule.TimesTriggered,
+                rule.LastTriggeredAt
+            };
+        }
+
+        private static bool TryNormalizeAutoModRule(
+            AutoModRuleRequest request,
+            out NormalizedAutoModRule normalized,
+            out string error)
+        {
+            normalized = new NormalizedAutoModRule(
+                string.Empty,
+                AutoModService.TriggerKeyword,
+                string.Empty,
+                AutoModService.ActionBlockMessage,
+                true);
+            error = string.Empty;
+
+            var name = request.Name?.Trim() ?? string.Empty;
+            if (name.Length is < 1 or > 80)
+            {
+                error = "AutoMod rule name must be 1-80 characters.";
+                return false;
+            }
+
+            if (!AutoModService.IsKnownTriggerType(request.TriggerType))
+            {
+                error = "AutoMod trigger must be keyword, invite_link, mention_spam, or link.";
+                return false;
+            }
+
+            if (!AutoModService.IsKnownActionType(request.ActionType))
+            {
+                error = "AutoMod action must be block_message or flag.";
+                return false;
+            }
+
+            var triggerType = AutoModService.NormalizeTriggerType(request.TriggerType);
+            var triggerValue = (request.TriggerValue ?? string.Empty).Trim();
+            if (triggerValue.Length > 1000)
+            {
+                error = "AutoMod trigger value must be 1000 characters or fewer.";
+                return false;
+            }
+
+            if (triggerType == AutoModService.TriggerKeyword && !HasAutoModKeywordTerm(triggerValue))
+            {
+                error = "Keyword rules need at least one keyword.";
+                return false;
+            }
+
+            if (triggerType == AutoModService.TriggerMentionSpam &&
+                (!int.TryParse(triggerValue, out var mentionLimit) || mentionLimit is < 1 or > 100))
+            {
+                error = "Mention spam rules need a threshold between 1 and 100.";
+                return false;
+            }
+
+            if (triggerType == AutoModService.TriggerInviteLink ||
+                triggerType == AutoModService.TriggerLink)
+            {
+                triggerValue = string.Empty;
+            }
+
+            normalized = new NormalizedAutoModRule(
+                name,
+                triggerType,
+                triggerValue,
+                AutoModService.NormalizeActionType(request.ActionType),
+                request.IsEnabled);
+            return true;
+        }
+
+        private static bool HasAutoModKeywordTerm(string value)
+        {
+            return value
+                .Split(new[] { '\n', '\r', ',' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Any(term => term.Length > 0);
         }
 
         private static object BuildServerTemplateResponse(ServerTemplateDefinition template)
@@ -879,7 +1000,59 @@ namespace DiscordCloneServer.Controllers
             var normalizedTag = NormalizeDiscoveryTag(tag);
             var normalizedQueryTag = NormalizeDiscoveryTag(normalizedQuery);
 
+            var discovery = await GetPublicServerDiscoveryAsync(
+                normalizedQuery,
+                normalizedCategory,
+                normalizedTag,
+                normalizedQueryTag,
+                take);
+
+            var serverIds = discovery.Servers
+                .Select(server => server.ServerID)
+                .Where(serverId => !string.IsNullOrWhiteSpace(serverId))
+                .Cast<string>()
+                .ToList();
+
+            var joinedServerIds = await _context.ServerMembers
+                .Where(member => member.Username == currentUsername && serverIds.Contains(member.ServerId))
+                .Select(member => member.ServerId)
+                .Distinct()
+                .ToListAsync();
+            var joined = joinedServerIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return Ok(discovery.Servers.Select(server =>
+            {
+                var serverId = server.ServerID ?? string.Empty;
+                return BuildPublicServerListingResponse(
+                    server,
+                    discovery.MemberCounts.GetValueOrDefault(serverId),
+                    discovery.ChannelCounts.GetValueOrDefault(serverId),
+                    joined.Contains(serverId) || server.ServerOwner == currentUsername);
+            }));
+        }
+
+        private async Task<PublicServerDiscoveryCacheItem> GetPublicServerDiscoveryAsync(
+            string? normalizedQuery,
+            string? normalizedCategory,
+            string? normalizedTag,
+            string? normalizedQueryTag,
+            int take)
+        {
+            var cacheKey = BuildPublicServerDiscoveryCacheKey(
+                normalizedQuery,
+                normalizedCategory,
+                normalizedTag,
+                take);
+            if (_publicDiscoveryCacheDuration > TimeSpan.Zero &&
+                _cache != null &&
+                _cache.TryGetValue<PublicServerDiscoveryCacheItem>(cacheKey, out var cachedDiscovery) &&
+                cachedDiscovery != null)
+            {
+                return cachedDiscovery;
+            }
+
             var publicServersQuery = _context.CreateServers
+                .AsNoTracking()
                 .Where(server => server.IsPublic);
 
             if (!string.IsNullOrWhiteSpace(normalizedCategory))
@@ -918,33 +1091,54 @@ namespace DiscordCloneServer.Controllers
                 .ToList();
 
             var memberCounts = await _context.ServerMembers
+                .AsNoTracking()
                 .Where(member => serverIds.Contains(member.ServerId))
                 .GroupBy(member => member.ServerId)
                 .Select(group => new { ServerId = group.Key, Count = group.Count() })
                 .ToDictionaryAsync(item => item.ServerId, item => item.Count);
 
             var channelCounts = await _context.Channels
+                .AsNoTracking()
                 .Where(channel => serverIds.Contains(channel.ServerId))
                 .GroupBy(channel => channel.ServerId)
                 .Select(group => new { ServerId = group.Key, Count = group.Count() })
                 .ToDictionaryAsync(item => item.ServerId, item => item.Count);
 
-            var joinedServerIds = await _context.ServerMembers
-                .Where(member => member.Username == currentUsername && serverIds.Contains(member.ServerId))
-                .Select(member => member.ServerId)
-                .Distinct()
-                .ToListAsync();
-            var joined = joinedServerIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            return Ok(publicServers.Select(server =>
+            var discovery = new PublicServerDiscoveryCacheItem(publicServers, memberCounts, channelCounts);
+            if (_publicDiscoveryCacheDuration > TimeSpan.Zero && _cache != null)
             {
-                var serverId = server.ServerID ?? string.Empty;
-                return BuildPublicServerListingResponse(
-                    server,
-                    memberCounts.GetValueOrDefault(serverId),
-                    channelCounts.GetValueOrDefault(serverId),
-                    joined.Contains(serverId) || server.ServerOwner == currentUsername);
-            }));
+                _cache.Set(
+                    cacheKey,
+                    discovery,
+                    new MemoryCacheEntryOptions
+                    {
+                        AbsoluteExpirationRelativeToNow = _publicDiscoveryCacheDuration
+                    });
+            }
+
+            return discovery;
+        }
+
+        private static string BuildPublicServerDiscoveryCacheKey(
+            string? normalizedQuery,
+            string? normalizedCategory,
+            string? normalizedTag,
+            int take)
+        {
+            var version = System.Threading.Volatile.Read(ref _publicDiscoveryCacheVersion);
+            return string.Join(
+                ':',
+                "public-server-discovery",
+                version.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                take.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                normalizedCategory ?? string.Empty,
+                normalizedTag ?? string.Empty,
+                normalizedQuery?.ToLowerInvariant() ?? string.Empty);
+        }
+
+        private static void InvalidatePublicServerDiscoveryCache()
+        {
+            System.Threading.Interlocked.Increment(ref _publicDiscoveryCacheVersion);
         }
 
         [HttpGet]
@@ -992,6 +1186,7 @@ namespace DiscordCloneServer.Controllers
                     DiscoveryTags = discoveryTags
                 });
             await _context.SaveChangesAsync();
+            InvalidatePublicServerDiscoveryCache();
 
             return Ok(BuildServerResponse(
                 server,
@@ -1094,6 +1289,7 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpPost]
+        [EnableRateLimiting("abuse")]
         public async Task<IActionResult> JoinPublicServer([FromBody] ServerActionRequest request)
         {
             var currentUsername = GetCurrentUsername();
@@ -1112,6 +1308,7 @@ namespace DiscordCloneServer.Controllers
 
 
         [HttpGet]
+        [EnableRateLimiting("abuse")]
         public async Task<IActionResult> GetInviteLink(string serverId)
         {
             var currentUsername = GetCurrentUsername();
@@ -1133,6 +1330,7 @@ namespace DiscordCloneServer.Controllers
 
             var invite = await _context.ServerInvites
                 .Where(i => i.ServerId == serverId && i.RevokedAt == null &&
+                            i.AbuseDetectedAt == null &&
                             (i.ExpiresAt == null || i.ExpiresAt > DateTime.UtcNow) &&
                             (i.MaxUses == null || i.Uses < i.MaxUses))
                 .OrderBy(i => i.CreatedAt)
@@ -1165,6 +1363,7 @@ namespace DiscordCloneServer.Controllers
 
 
         [HttpPost]
+        [EnableRateLimiting("abuse")]
         public async Task<IActionResult> JoinServer([FromBody] JoinServerRequest req)
         {
             var normalizedUsername = GetCurrentUsername();
@@ -1183,10 +1382,11 @@ namespace DiscordCloneServer.Controllers
             if (invite != null)
             {
                 if (invite.RevokedAt != null ||
+                    invite.AbuseDetectedAt != null ||
                     invite.ExpiresAt <= DateTime.UtcNow ||
                     (invite.MaxUses != null && invite.Uses >= invite.MaxUses))
                 {
-                    return BadRequest(new { Message = "Invite link is expired or has reached its usage limit." });
+                    return BadRequest(new { Message = "Invite link is expired, paused, or has reached its usage limit." });
                 }
 
                 server = await _context.CreateServers.FirstOrDefaultAsync(s => s.ServerID == invite.ServerId);
@@ -1444,6 +1644,145 @@ namespace DiscordCloneServer.Controllers
             return Ok(BuildServerResponse(server, server.ServerOwner == currentUsername ? "owner" : "user"));
         }
 
+        [HttpGet]
+        public async Task<IActionResult> GetAutoModRules(string serverId)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageServer(serverId, currentUsername))
+                return Forbid();
+
+            var rules = await _context.ServerAutoModRules
+                .Where(rule => rule.ServerId == serverId)
+                .OrderByDescending(rule => rule.IsEnabled)
+                .ThenBy(rule => rule.CreatedAt)
+                .ToListAsync();
+
+            return Ok(rules.Select(BuildAutoModRuleResponse));
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("abuse")]
+        public async Task<IActionResult> CreateAutoModRule([FromBody] AutoModRuleRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            if (!await CanManageServer(request.ServerId, currentUsername))
+                return Forbid();
+
+            if (!await _context.CreateServers.AnyAsync(server => server.ServerID == request.ServerId))
+                return NotFound(new { Message = "Server not found." });
+
+            var ruleCount = await _context.ServerAutoModRules.CountAsync(rule => rule.ServerId == request.ServerId);
+            if (ruleCount >= 25)
+                return BadRequest(new { Message = "A server can have up to 25 AutoMod rules." });
+
+            if (!TryNormalizeAutoModRule(request, out var normalized, out var error))
+                return BadRequest(new { Message = error });
+
+            var now = DateTime.UtcNow;
+            var rule = new ServerAutoModRule
+            {
+                Id = Guid.NewGuid().ToString(),
+                ServerId = request.ServerId,
+                Name = normalized.Name,
+                TriggerType = normalized.TriggerType,
+                TriggerValue = normalized.TriggerValue,
+                ActionType = normalized.ActionType,
+                IsEnabled = normalized.IsEnabled,
+                CreatedBy = currentUsername,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+
+            _context.ServerAutoModRules.Add(rule);
+            AddAuditLog(
+                request.ServerId,
+                "automod_rule_created",
+                currentUsername,
+                "automod_rule",
+                rule.Id,
+                details: new { rule.Name, rule.TriggerType, rule.ActionType, rule.IsEnabled });
+            await _context.SaveChangesAsync();
+
+            return Ok(BuildAutoModRuleResponse(rule));
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("abuse")]
+        public async Task<IActionResult> UpdateAutoModRule([FromBody] AutoModRuleRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            var rule = await _context.ServerAutoModRules.FirstOrDefaultAsync(item => item.Id == request.RuleId);
+            if (rule == null)
+                return NotFound(new { Message = "AutoMod rule not found." });
+
+            if (!string.Equals(rule.ServerId, request.ServerId, StringComparison.Ordinal))
+                return BadRequest(new { Message = "AutoMod rule does not belong to this server." });
+
+            if (!await CanManageServer(rule.ServerId, currentUsername))
+                return Forbid();
+
+            if (!TryNormalizeAutoModRule(request, out var normalized, out var error))
+                return BadRequest(new { Message = error });
+
+            rule.Name = normalized.Name;
+            rule.TriggerType = normalized.TriggerType;
+            rule.TriggerValue = normalized.TriggerValue;
+            rule.ActionType = normalized.ActionType;
+            rule.IsEnabled = normalized.IsEnabled;
+            rule.UpdatedAt = DateTime.UtcNow;
+
+            AddAuditLog(
+                rule.ServerId,
+                "automod_rule_updated",
+                currentUsername,
+                "automod_rule",
+                rule.Id,
+                details: new { rule.Name, rule.TriggerType, rule.ActionType, rule.IsEnabled });
+            await _context.SaveChangesAsync();
+
+            return Ok(BuildAutoModRuleResponse(rule));
+        }
+
+        [HttpPost]
+        [EnableRateLimiting("abuse")]
+        public async Task<IActionResult> DeleteAutoModRule([FromBody] AutoModRuleActionRequest request)
+        {
+            var currentUsername = GetCurrentUsername();
+            if (currentUsername == null)
+                return Unauthorized(new { Message = "Missing user identity." });
+
+            var rule = await _context.ServerAutoModRules.FirstOrDefaultAsync(item => item.Id == request.RuleId);
+            if (rule == null)
+                return NotFound(new { Message = "AutoMod rule not found." });
+
+            if (!string.Equals(rule.ServerId, request.ServerId, StringComparison.Ordinal))
+                return BadRequest(new { Message = "AutoMod rule does not belong to this server." });
+
+            if (!await CanManageServer(rule.ServerId, currentUsername))
+                return Forbid();
+
+            _context.ServerAutoModRules.Remove(rule);
+            AddAuditLog(
+                rule.ServerId,
+                "automod_rule_deleted",
+                currentUsername,
+                "automod_rule",
+                rule.Id,
+                details: new { rule.Name, rule.TriggerType, rule.ActionType });
+            await _context.SaveChangesAsync();
+
+            return Ok(new { Message = "AutoMod rule deleted." });
+        }
+
         [HttpPost]
         public async Task<IActionResult> CreateChannel([FromBody] ChannelMutationRequest request)
         {
@@ -1486,6 +1825,7 @@ namespace DiscordCloneServer.Controllers
                 channel.Id,
                 details: new { channel.Name, channel.Type, channel.CategoryId });
             await _context.SaveChangesAsync();
+            InvalidatePublicServerDiscoveryCache();
             return Ok(channel);
         }
 
@@ -1752,6 +2092,7 @@ namespace DiscordCloneServer.Controllers
                 channel.Id,
                 details: new { channel.Name, channel.Type, MessageCount = messages.Count, WebhookCount = webhooks.Count });
             await _context.SaveChangesAsync();
+            InvalidatePublicServerDiscoveryCache();
             return Ok(new { Message = "Channel deleted." });
         }
 
@@ -1946,6 +2287,7 @@ namespace DiscordCloneServer.Controllers
                 .ToListAsync();
             _context.ServerMembers.RemoveRange(memberships);
             await _context.SaveChangesAsync();
+            InvalidatePublicServerDiscoveryCache();
             await _hubContext.Clients.Group(request.ServerId).SendAsync("UserLeft", currentUsername);
             return Ok(new { Message = "Left server." });
         }
@@ -1984,6 +2326,7 @@ namespace DiscordCloneServer.Controllers
                 targetUsername,
                 new { Reason = request.Reason?.Trim() });
             await _context.SaveChangesAsync();
+            InvalidatePublicServerDiscoveryCache();
             await _hubContext.Clients.Group(request.ServerId).SendAsync("UserLeft", targetUsername);
             return Ok(new { Message = "Member kicked." });
         }
@@ -2037,6 +2380,7 @@ namespace DiscordCloneServer.Controllers
                 targetUsername,
                 new { Reason = request.Reason?.Trim() });
             await _context.SaveChangesAsync();
+            InvalidatePublicServerDiscoveryCache();
             await _hubContext.Clients.Group(request.ServerId).SendAsync("UserLeft", targetUsername);
             return Ok(new { Message = "Member banned." });
         }
@@ -2505,7 +2849,10 @@ namespace DiscordCloneServer.Controllers
                 InviteLink = BuildInviteLink(Request, invite.Code),
                 invite.ExpiresAt,
                 invite.MaxUses,
-                invite.Uses
+                invite.Uses,
+                invite.LastUsedAt,
+                invite.AbuseDetectedAt,
+                invite.AbuseReason
             });
         }
 
@@ -2534,8 +2881,12 @@ namespace DiscordCloneServer.Controllers
                 invite.ExpiresAt,
                 invite.MaxUses,
                 invite.Uses,
+                invite.LastUsedAt,
+                invite.AbuseDetectedAt,
+                invite.AbuseReason,
                 invite.RevokedAt,
                 IsActive = invite.RevokedAt == null &&
+                           invite.AbuseDetectedAt == null &&
                            (invite.ExpiresAt == null || invite.ExpiresAt > DateTime.UtcNow) &&
                            (invite.MaxUses == null || invite.Uses < invite.MaxUses)
             }));
@@ -2726,6 +3077,15 @@ namespace DiscordCloneServer.Controllers
                 }
             }
 
+            if (invite != null)
+            {
+                var inviteAbuseBlock = await RejectInviteAbuseIfDetected(invite, normalizedUsername);
+                if (inviteAbuseBlock != null)
+                {
+                    return inviteAbuseBlock;
+                }
+            }
+
             var membership = new ServerMember
             {
                 Id = Guid.NewGuid().ToString(),
@@ -2739,12 +3099,85 @@ namespace DiscordCloneServer.Controllers
             if (invite != null)
             {
                 invite.Uses += 1;
+                invite.LastUsedAt = DateTime.UtcNow;
             }
             await _context.SaveChangesAsync();
+            InvalidatePublicServerDiscoveryCache();
 
             await _hubContext.Clients.Group(serverId).SendAsync("NewMember", normalizedUsername);
 
             return Ok(BuildServerResponse(server, role, onboardingCompletedAt: membership.OnboardingCompletedAt));
+        }
+
+        private async Task<IActionResult?> RejectInviteAbuseIfDetected(ServerInvite invite, string joinedUsername)
+        {
+            if (_inviteAbuseDetectionService == null)
+            {
+                return null;
+            }
+
+            var result = await _inviteAbuseDetectionService.CheckAndTrackAsync(
+                new InviteAbuseDetectionRequest(
+                    invite.ServerId,
+                    invite.Id,
+                    invite.Code,
+                    joinedUsername,
+                    GetClientIpAddress()),
+                HttpContext.RequestAborted);
+
+            if (result.Allowed)
+            {
+                return null;
+            }
+
+            var now = DateTime.UtcNow;
+            invite.AbuseDetectedAt = now;
+            invite.AbuseReason = result.ReasonCode;
+            if (result.ShouldRevokeInvite)
+            {
+                invite.RevokedAt ??= now;
+            }
+
+            AddAuditLog(
+                invite.ServerId,
+                "invite_abuse_detected",
+                "automod",
+                "invite",
+                invite.Id,
+                details: new
+                {
+                    invite.Code,
+                    JoinedUsername = joinedUsername,
+                    result.ReasonCode,
+                    result.RecentInviteUses,
+                    result.RecentIpUses,
+                    Revoked = result.ShouldRevokeInvite
+                });
+            await _context.SaveChangesAsync();
+
+            if (result.RetryAfterSeconds > 0)
+            {
+                Response.Headers.RetryAfter = result.RetryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+            }
+
+            return StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                Message = result.Message,
+                Reason = result.ReasonCode,
+                RetryAfterSeconds = result.RetryAfterSeconds
+            });
+        }
+
+        private string? GetClientIpAddress()
+        {
+            var forwardedFor = Request.Headers["X-Forwarded-For"].FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(forwardedFor))
+            {
+                return forwardedFor.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault();
+            }
+
+            return HttpContext.Connection.RemoteIpAddress?.ToString();
         }
 
         private async Task<bool> CanManageServer(string serverId, string username)
@@ -3391,5 +3824,22 @@ namespace DiscordCloneServer.Controllers
     public class InviteActionRequest
     {
         public string InviteId { get; set; } = string.Empty;
+    }
+
+    public class AutoModRuleRequest
+    {
+        public string? RuleId { get; set; }
+        public string ServerId { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public string TriggerType { get; set; } = "keyword";
+        public string TriggerValue { get; set; } = string.Empty;
+        public string ActionType { get; set; } = "block_message";
+        public bool IsEnabled { get; set; } = true;
+    }
+
+    public class AutoModRuleActionRequest
+    {
+        public string ServerId { get; set; } = string.Empty;
+        public string RuleId { get; set; } = string.Empty;
     }
 }
