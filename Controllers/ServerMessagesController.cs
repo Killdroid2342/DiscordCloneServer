@@ -1,6 +1,7 @@
 using DiscordCloneServer.Data;
 using DiscordCloneServer.Models;
 using DiscordCloneServer.Services;
+using System.Globalization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -16,15 +17,27 @@ namespace DiscordCloneServer.Controllers
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
         private readonly IEmailNotificationSender? _emailNotificationSender;
+        private readonly ISpamDetectionService? _spamDetectionService;
+        private readonly IAutoModService? _autoModService;
+        private readonly IBackgroundJobQueue? _backgroundJobQueue;
+        private readonly IMessageNotificationService? _messageNotificationService;
 
         public ServerMessagesController(
             ApiContext context,
             IConfiguration config,
-            IEmailNotificationSender? emailNotificationSender = null)
+            IEmailNotificationSender? emailNotificationSender = null,
+            ISpamDetectionService? spamDetectionService = null,
+            IAutoModService? autoModService = null,
+            IBackgroundJobQueue? backgroundJobQueue = null,
+            IMessageNotificationService? messageNotificationService = null)
         {
             _context = context;
             _config = config;
             _emailNotificationSender = emailNotificationSender;
+            _spamDetectionService = spamDetectionService;
+            _autoModService = autoModService;
+            _backgroundJobQueue = backgroundJobQueue;
+            _messageNotificationService = messageNotificationService;
         }
 
         [HttpPost]
@@ -94,6 +107,25 @@ namespace DiscordCloneServer.Controllers
             if (await _context.ServerMessages.AnyAsync(message => message.MessageID == serverMessage.MessageID))
                 return Conflict(new { message = "Duplicate message id." });
 
+            var autoModBlock = await RejectAutoModIfDetected(new AutoModCheckRequest(
+                channel.ServerId,
+                "server_message",
+                serverMessage.ChannelId,
+                username,
+                serverMessage.userText,
+                serverMessage.AttachmentUrl));
+            if (autoModBlock != null)
+                return autoModBlock;
+
+            var spamBlock = await RejectSpamIfDetected(new SpamDetectionRequest(
+                "server",
+                serverMessage.ChannelId,
+                username,
+                serverMessage.userText,
+                serverMessage.AttachmentUrl));
+            if (spamBlock != null)
+                return spamBlock;
+
             _context.ServerMessages.Add(serverMessage);
             if (pollDraft != null)
             {
@@ -101,7 +133,7 @@ namespace DiscordCloneServer.Controllers
             }
 
             await _context.SaveChangesAsync();
-            await SendServerMentionEmailNotifications(serverMessage, channel);
+            await DispatchServerMentionEmailNotifications(serverMessage, channel);
             var pollLookup = await MessagePollService.GetPollLookupAsync(
                 _context,
                 "server",
@@ -706,6 +738,25 @@ namespace DiscordCloneServer.Controllers
                     message.ThreadMessageId == threadMessage.ThreadMessageId))
                 return Conflict(new { message = "Duplicate thread message id." });
 
+            var autoModBlock = await RejectAutoModIfDetected(new AutoModCheckRequest(
+                channel.ServerId,
+                "thread_message",
+                threadMessage.ThreadId,
+                username,
+                threadMessage.userText,
+                threadMessage.AttachmentUrl));
+            if (autoModBlock != null)
+                return autoModBlock;
+
+            var spamBlock = await RejectSpamIfDetected(new SpamDetectionRequest(
+                "thread",
+                threadMessage.ThreadId,
+                username,
+                threadMessage.userText,
+                threadMessage.AttachmentUrl));
+            if (spamBlock != null)
+                return spamBlock;
+
             access.Thread!.LastActivityAt = now;
             _context.ServerThreadMessages.Add(threadMessage);
             await _context.SaveChangesAsync();
@@ -1166,6 +1217,78 @@ namespace DiscordCloneServer.Controllers
             return await _context.MessageReactions
                 .Where(reaction => reaction.ScopeType == scopeType && reaction.MessageId == messageId)
                 .ToListAsync();
+        }
+
+        private async Task<IActionResult?> RejectSpamIfDetected(SpamDetectionRequest request)
+        {
+            if (_spamDetectionService == null)
+            {
+                return null;
+            }
+
+            var result = await _spamDetectionService.CheckAsync(request, HttpContext.RequestAborted);
+            if (result.Allowed)
+            {
+                return null;
+            }
+
+            if (result.RetryAfterSeconds > 0)
+            {
+                Response.Headers.RetryAfter = result.RetryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+            }
+
+            return StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                message = result.Message,
+                reason = result.ReasonCode,
+                retryAfterSeconds = result.RetryAfterSeconds
+            });
+        }
+
+        private async Task<IActionResult?> RejectAutoModIfDetected(AutoModCheckRequest request)
+        {
+            if (_autoModService == null)
+            {
+                return null;
+            }
+
+            var result = await _autoModService.CheckAsync(request, HttpContext.RequestAborted);
+            if (result.Allowed)
+            {
+                return null;
+            }
+
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                message = result.Message,
+                reason = result.ReasonCode,
+                ruleId = result.RuleId,
+                ruleName = result.RuleName
+            });
+        }
+
+        private async Task DispatchServerMentionEmailNotifications(
+            Models.ServerMessage message,
+            Channel channel)
+        {
+            if (_messageNotificationService != null)
+            {
+                if (_backgroundJobQueue?.TryQueue(async (services, cancellationToken) =>
+                {
+                    var notifications = services.GetRequiredService<IMessageNotificationService>();
+                    await notifications.SendServerMentionEmailNotificationsAsync(message.MessageID, cancellationToken);
+                }) == true)
+                {
+                    return;
+                }
+
+                await _messageNotificationService.SendServerMentionEmailNotificationsAsync(
+                    message.MessageID,
+                    HttpContext.RequestAborted);
+                return;
+            }
+
+            await SendServerMentionEmailNotifications(message, channel);
         }
 
         private async Task SendServerMentionEmailNotifications(Models.ServerMessage message, Channel channel)
