@@ -28,7 +28,113 @@ namespace DiscordCloneServer.Services
             _logger = logger;
         }
 
+        public async Task SendServerMentionEmailNotificationsAsync(
+            string messageId,
+            CancellationToken cancellationToken = default)
+        {
+            var message = await _context.ServerMessages.FirstOrDefaultAsync(
+                item => item.MessageID == messageId,
+                cancellationToken);
+            if (message == null)
+            {
+                return;
+            }
+
+            var channel = await _context.Channels.FirstOrDefaultAsync(
+                item => item.Id == message.ChannelId,
+                cancellationToken);
+            if (channel == null)
+            {
+                return;
+            }
+
+            var mentionNames = ExtractMentions(message.userText)
+                .Where(mention =>
+                    !mention.Equals("everyone", StringComparison.OrdinalIgnoreCase) &&
+                    !mention.Equals("here", StringComparison.OrdinalIgnoreCase) &&
+                    !mention.Equals(message.MessagesUserSender, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (mentionNames.Length == 0)
+            {
+                return;
+            }
+
+            var serverMemberNames = await _context.ServerMembers
+                .Where(member => member.ServerId == channel.ServerId)
+                .Select(member => member.Username)
+                .ToListAsync(cancellationToken);
+            var recipientNames = serverMemberNames
+                .Where(member => mentionNames.Contains(member, StringComparer.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (recipientNames.Length == 0)
+            {
+                return;
+            }
+
+            var accounts = await _context.Accounts
+                .Where(account => !account.IsDisabled)
+                .ToListAsync(cancellationToken);
+            var recipients = accounts
+                .Where(account => recipientNames.Contains(account.UserName, StringComparer.OrdinalIgnoreCase));
+
+            foreach (var recipient in recipients)
+            {
+                await SendSafelyAsync(
+                    recipient,
+                    new EmailNotificationRequest(
+                        message.MessagesUserSender,
+                        $"{message.MessagesUserSender} mentioned you in #{channel.Name}",
+                        EmailNotificationPreferences.BuildPreview(message.userText, message.AttachmentUrl),
+                        "server",
+                        channel.Name,
+                        channel.Id,
+                        message.MessageID,
+                        ParseDate(message.Date)),
+                    cancellationToken);
+            }
+        }
+
         
+        private async Task SendSafelyAsync(
+            Account recipient,
+            EmailNotificationRequest notification,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await _emailNotificationSender.SendToAccountAsync(recipient, notification, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Could not send {Scope} email notification {MessageId} to {RecipientUsername}",
+                    notification.Scope,
+                    notification.MessageId,
+                    recipient.UserName);
+            }
+        }
+
+        private static string[] ExtractMentions(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return Array.Empty<string>();
+            }
+
+            return Regex
+                .Matches(text, @"@([A-Za-z0-9_.-]{3,32})")
+                .Select(match => match.Groups[1].Value)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
         private static string BuildDmScopeId(string left, string right)
         {
             var users = new[] { left, right }
