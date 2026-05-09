@@ -82,7 +82,8 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("ServerOwner")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
 
                     b.Property<string>("VerificationLevel")
                         .IsRequired()
@@ -102,6 +103,8 @@ namespace DiscordCloneServer.Migrations
                         .HasColumnType("nvarchar(600)");
 
                     b.HasKey("ServerID");
+
+                    b.HasIndex("ServerOwner");
 
                     b.HasIndex("IsPublic", "DiscoveryCategory");
 
@@ -256,13 +259,18 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("UserName")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
 
                     b.Property<string>("VoiceChangerSettingsJson")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("Email");
+
+                    b.HasIndex("UserName");
 
                     b.ToTable("Accounts", (string)null);
                 });
@@ -312,6 +320,8 @@ namespace DiscordCloneServer.Migrations
                         .IsUnique();
 
                     b.HasIndex("AccountId", "RevokedAt");
+
+                    b.HasIndex("Username", "ExpiresAt", "LastSeenAt");
 
                     b.ToTable("Account_Sessions", (string)null);
                 });
@@ -386,16 +396,20 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("Name")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
 
                     b.Property<int>("Position")
                         .HasColumnType("int");
 
                     b.Property<string>("ServerId")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ServerId", "Position");
 
                     b.ToTable("Categories", (string)null);
                 });
@@ -406,7 +420,8 @@ namespace DiscordCloneServer.Migrations
                         .HasColumnType("nvarchar(450)");
 
                     b.Property<string>("CategoryId")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.Property<string>("MessageSendAllowedRolesJson")
                         .IsRequired()
@@ -421,14 +436,16 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("Name")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
 
                     b.Property<int>("Position")
                         .HasColumnType("int");
 
                     b.Property<string>("ServerId")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.Property<bool>("StageSpeakerRestricted")
                         .ValueGeneratedOnAdd()
@@ -443,7 +460,8 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("Type")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
 
                     b.Property<bool>("ViewAccessRestricted")
                         .ValueGeneratedOnAdd()
@@ -468,6 +486,10 @@ namespace DiscordCloneServer.Migrations
                         .HasDefaultValue("[]");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("CategoryId", "Position");
+
+                    b.HasIndex("ServerId", "Position");
 
                     b.ToTable("Channels", (string)null);
                 });
@@ -570,9 +592,14 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("Sender")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("GroupId");
+
+                    b.HasIndex("Sender");
 
                     b.ToTable("GroupMessages", (string)null);
                 });
@@ -939,16 +966,23 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("MessageUserReciver")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
 
                     b.Property<string>("MessagesUserSender")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
 
                     b.Property<string>("ReplyToMessageId")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.HasKey("PrivateMessageID");
+
+                    b.HasIndex("MessageUserReciver", "MessagesUserSender");
+
+                    b.HasIndex("MessagesUserSender", "MessageUserReciver");
 
                     b.ToTable("Private_Message_Friend", (string)null);
                 });
@@ -996,6 +1030,63 @@ namespace DiscordCloneServer.Migrations
                     b.HasIndex("ServerId", "CreatedAt");
 
                     b.ToTable("Server_Audit_Logs", (string)null);
+                });
+
+            modelBuilder.Entity("DiscordCloneServer.Models.ServerAutoModRule", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("ActionType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<DateTime?>("LastTriggeredAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("nvarchar(80)");
+
+                    b.Property<string>("ServerId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<int>("TimesTriggered")
+                        .HasColumnType("int");
+
+                    b.Property<string>("TriggerType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("TriggerValue")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ServerId", "IsEnabled");
+
+                    b.ToTable("Server_AutoMod_Rules", (string)null);
                 });
 
             modelBuilder.Entity("DiscordCloneServer.Models.ServerBan", b =>
@@ -1073,6 +1164,13 @@ namespace DiscordCloneServer.Migrations
                     b.Property<string>("Id")
                         .HasColumnType("nvarchar(450)");
 
+                    b.Property<DateTime?>("AbuseDetectedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("AbuseReason")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
                     b.Property<string>("Code")
                         .IsRequired()
                         .HasColumnType("nvarchar(450)");
@@ -1087,6 +1185,9 @@ namespace DiscordCloneServer.Migrations
                     b.Property<DateTime?>("ExpiresAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<DateTime?>("LastUsedAt")
+                        .HasColumnType("datetime2");
+
                     b.Property<int?>("MaxUses")
                         .HasColumnType("int");
 
@@ -1095,7 +1196,8 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("ServerId")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.Property<int>("Uses")
                         .HasColumnType("int");
@@ -1105,7 +1207,57 @@ namespace DiscordCloneServer.Migrations
                     b.HasIndex("Code")
                         .IsUnique();
 
+                    b.HasIndex("ServerId", "RevokedAt", "ExpiresAt");
+
                     b.ToTable("Server_Invites", (string)null);
+                });
+
+            modelBuilder.Entity("DiscordCloneServer.Models.ServerInviteUse", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("InviteCode")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("InviteId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("IpAddressHash")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("JoinedUsername")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("ServerId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<DateTime>("UsedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("WasBlocked")
+                        .HasColumnType("bit");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InviteId", "UsedAt");
+
+                    b.HasIndex("ServerId", "IpAddressHash", "UsedAt");
+
+                    b.ToTable("Server_Invite_Uses", (string)null);
                 });
 
             modelBuilder.Entity("DiscordCloneServer.Models.ServerMember", b =>
@@ -1129,20 +1281,27 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("Role")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
 
                     b.Property<string>("ServerId")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.Property<DateTime?>("TimedOutUntil")
                         .HasColumnType("datetime2");
 
                     b.Property<string>("Username")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ServerId", "Username");
+
+                    b.HasIndex("Username", "ServerId");
 
                     b.ToTable("Server_Members", (string)null);
                 });
@@ -1164,7 +1323,8 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("ChannelId")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.Property<string>("Date")
                         .IsRequired()
@@ -1186,7 +1346,8 @@ namespace DiscordCloneServer.Migrations
 
                     b.Property<string>("MessagesUserSender")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
 
                     b.Property<DateTime?>("PinnedAt")
                         .HasColumnType("datetime2");
@@ -1196,7 +1357,8 @@ namespace DiscordCloneServer.Migrations
                         .HasColumnType("nvarchar(256)");
 
                     b.Property<string>("ReplyToMessageId")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.Property<string>("SenderAvatarUrl")
                         .HasMaxLength(2048)
@@ -1215,6 +1377,10 @@ namespace DiscordCloneServer.Migrations
                         .HasColumnType("nvarchar(max)");
 
                     b.HasKey("MessageID");
+
+                    b.HasIndex("MessagesUserSender");
+
+                    b.HasIndex("ChannelId", "IsPinned");
 
                     b.ToTable("Server_Message", (string)null);
                 });
@@ -1389,6 +1555,8 @@ namespace DiscordCloneServer.Migrations
                         .HasColumnType("nvarchar(max)");
 
                     b.HasKey("ThreadMessageId");
+
+                    b.HasIndex("MessagesUserSender");
 
                     b.HasIndex("ThreadId");
 
@@ -1641,6 +1809,11 @@ namespace DiscordCloneServer.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
+                    b.Property<bool>("ReporterBlockedTarget")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
+
                     b.Property<string>("ResolutionNote")
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
@@ -1680,6 +1853,8 @@ namespace DiscordCloneServer.Migrations
                     b.HasIndex("ReportedByUsername", "CreatedAt");
 
                     b.HasIndex("ServerId", "Status", "CreatedAt");
+
+                    b.HasIndex("ServerId", "TargetUsername", "Status", "CreatedAt");
 
                     b.ToTable("User_Reports", (string)null);
                 });
