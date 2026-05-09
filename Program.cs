@@ -139,9 +139,22 @@ namespace DiscordCloneServer
                  };
              });
             builder.Services.AddControllers();
+            builder.Services.AddMemoryCache();
+            builder.Services.Configure<BackgroundJobOptions>(
+                builder.Configuration.GetSection(BackgroundJobOptions.SectionName));
             builder.Services.Configure<CleanupJobOptions>(
                 builder.Configuration.GetSection(CleanupJobOptions.SectionName));
+            builder.Services.Configure<SpamDetectionOptions>(
+                builder.Configuration.GetSection(SpamDetectionOptions.SectionName));
+            builder.Services.Configure<InviteAbuseDetectionOptions>(
+                builder.Configuration.GetSection(InviteAbuseDetectionOptions.SectionName));
+            builder.Services.AddSingleton<IBackgroundJobQueue, BackgroundJobQueue>();
             builder.Services.AddScoped<CleanupJobRunner>();
+            builder.Services.AddScoped<ISpamDetectionService, SpamDetectionService>();
+            builder.Services.AddScoped<IInviteAbuseDetectionService, InviteAbuseDetectionService>();
+            builder.Services.AddScoped<IAutoModService, AutoModService>();
+            builder.Services.AddScoped<IMessageNotificationService, MessageNotificationService>();
+            builder.Services.AddHostedService<BackgroundJobWorker>();
             builder.Services.AddHostedService<BackgroundCleanupService>();
             builder.Services.AddSingleton<MonitoringMetrics>();
             builder.Services.AddHttpClient<IContactVerificationDelivery, ContactVerificationDelivery>();
@@ -191,6 +204,10 @@ namespace DiscordCloneServer
             builder.Services.AddSwaggerGen();
             builder.Services.AddSignalR();
 
+            var staticFileCacheSeconds = Math.Max(
+                0,
+                builder.Configuration.GetValue<int?>("StaticFiles:CacheSeconds") ?? 31536000);
+
             try
             {
                 var app = builder.Build();
@@ -205,7 +222,21 @@ namespace DiscordCloneServer
                 app.UseStaticFiles(new StaticFileOptions
                 {
                     FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(wwwrootPath),
-                    RequestPath = ""
+                    RequestPath = "",
+                    OnPrepareResponse = context =>
+                    {
+                        var requestPath = context.Context.Request.Path.Value ?? string.Empty;
+                        if (staticFileCacheSeconds <= 0 || !IsCacheableStaticFile(requestPath))
+                        {
+                            return;
+                        }
+
+                        context.Context.Response.Headers["Cache-Control"] =
+                            $"public,max-age={staticFileCacheSeconds},immutable";
+                        context.Context.Response.Headers["Expires"] =
+                            DateTime.UtcNow.AddSeconds(staticFileCacheSeconds).ToString("R", CultureInfo.InvariantCulture);
+                        context.Context.Response.Headers["Vary"] = "Accept-Encoding";
+                    }
                 });
 
                 if (app.Environment.IsDevelopment())
@@ -269,6 +300,17 @@ namespace DiscordCloneServer
                 uri.Host.Equals("::1", StringComparison.OrdinalIgnoreCase);
 
             return isLoopbackHost && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+        }
+
+        private static bool IsCacheableStaticFile(string requestPath)
+        {
+            if (string.IsNullOrWhiteSpace(requestPath))
+            {
+                return false;
+            }
+
+            var extension = Path.GetExtension(requestPath);
+            return !string.IsNullOrWhiteSpace(extension);
         }
 
     }
