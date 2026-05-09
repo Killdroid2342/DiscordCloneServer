@@ -21,6 +21,8 @@ namespace DiscordCloneServer.Data
         public DbSet<ServerRole> ServerRoles { get; set; }
         public DbSet<ServerBan> ServerBans { get; set; }
         public DbSet<ServerInvite> ServerInvites { get; set; }
+        public DbSet<ServerInviteUse> ServerInviteUses { get; set; }
+        public DbSet<ServerAutoModRule> ServerAutoModRules { get; set; }
         public DbSet<ServerEmoji> ServerEmojis { get; set; }
         public DbSet<ServerSticker> ServerStickers { get; set; }
         public DbSet<MessageReaction> MessageReactions { get; set; }
@@ -53,6 +55,13 @@ namespace DiscordCloneServer.Data
                 c => (c ?? Array.Empty<string>()).ToArray());
 
             modelBuilder.Entity<Account>().ToTable("Accounts");
+            modelBuilder.Entity<Account>()
+                .Property(a => a.UserName)
+                .HasMaxLength(256);
+            modelBuilder.Entity<Account>()
+                .HasIndex(a => a.UserName);
+            modelBuilder.Entity<Account>()
+                .HasIndex(a => a.Email);
             modelBuilder.Entity<AccountSession>().ToTable("Account_Sessions");
             modelBuilder.Entity<AccountSession>()
                 .Property(session => session.RefreshTokenHash)
@@ -65,6 +74,8 @@ namespace DiscordCloneServer.Data
                 .IsUnique();
             modelBuilder.Entity<AccountSession>()
                 .HasIndex(session => new { session.AccountId, session.RevokedAt });
+            modelBuilder.Entity<AccountSession>()
+                .HasIndex(session => new { session.Username, session.ExpiresAt, session.LastSeenAt });
          
             modelBuilder.Entity<Account>()
                 .Property(a => a.Friends)
@@ -164,8 +175,18 @@ namespace DiscordCloneServer.Data
                 )
                 .Metadata.SetValueComparer(stringArrayComparer);
             modelBuilder.Entity<GroupMessage>().ToTable("GroupMessages");
+            modelBuilder.Entity<GroupMessage>()
+                .Property(message => message.Sender)
+                .HasMaxLength(256);
+            modelBuilder.Entity<GroupMessage>()
+                .HasIndex(message => message.GroupId);
+            modelBuilder.Entity<GroupMessage>()
+                .HasIndex(message => message.Sender);
 
             modelBuilder.Entity<CreateServer>().ToTable("Create_Server");
+            modelBuilder.Entity<CreateServer>()
+                .Property(server => server.ServerOwner)
+                .HasMaxLength(256);
             modelBuilder.Entity<CreateServer>()
                 .Property(server => server.VerificationLevel)
                 .HasMaxLength(32);
@@ -196,6 +217,8 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<CreateServer>()
                 .HasIndex(server => new { server.IsPublic, server.DiscoveryCategory });
             modelBuilder.Entity<CreateServer>()
+                .HasIndex(server => server.ServerOwner);
+            modelBuilder.Entity<CreateServer>()
                 .Property(server => server.RequireVerifiedEmail)
                 .HasDefaultValue(false);
             modelBuilder.Entity<CreateServer>()
@@ -208,6 +231,15 @@ namespace DiscordCloneServer.Data
                 .Property(server => server.RequireTwoFactorForModerators)
                 .HasDefaultValue(false);
             modelBuilder.Entity<ServerMessage>().ToTable("Server_Message");
+            modelBuilder.Entity<ServerMessage>()
+                .Property(message => message.ChannelId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerMessage>()
+                .Property(message => message.MessagesUserSender)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerMessage>()
+                .Property(message => message.ReplyToMessageId)
+                .HasMaxLength(128);
             modelBuilder.Entity<ServerMessage>()
                 .Property(message => message.IsPinned)
                 .HasDefaultValue(false);
@@ -226,6 +258,10 @@ namespace DiscordCloneServer.Data
             modelBuilder.Entity<ServerMessage>()
                 .Property(message => message.SenderAvatarUrl)
                 .HasMaxLength(2048);
+            modelBuilder.Entity<ServerMessage>()
+                .HasIndex(message => new { message.ChannelId, message.IsPinned });
+            modelBuilder.Entity<ServerMessage>()
+                .HasIndex(message => message.MessagesUserSender);
             modelBuilder.Entity<ServerThread>().ToTable("Server_Threads");
             modelBuilder.Entity<ServerThread>()
                 .Property(thread => thread.ServerId)
@@ -256,15 +292,55 @@ namespace DiscordCloneServer.Data
                 .HasMaxLength(256);
             modelBuilder.Entity<ServerThreadMessage>()
                 .HasIndex(message => message.ThreadId);
+            modelBuilder.Entity<ServerThreadMessage>()
+                .HasIndex(message => message.MessagesUserSender);
             modelBuilder.Entity<PrivateMessageFriend>().ToTable("Private_Message_Friend");
+            modelBuilder.Entity<PrivateMessageFriend>()
+                .Property(message => message.MessagesUserSender)
+                .HasMaxLength(256);
+            modelBuilder.Entity<PrivateMessageFriend>()
+                .Property(message => message.MessageUserReciver)
+                .HasMaxLength(256);
+            modelBuilder.Entity<PrivateMessageFriend>()
+                .Property(message => message.ReplyToMessageId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<PrivateMessageFriend>()
+                .HasIndex(message => new { message.MessagesUserSender, message.MessageUserReciver });
+            modelBuilder.Entity<PrivateMessageFriend>()
+                .HasIndex(message => new { message.MessageUserReciver, message.MessagesUserSender });
             modelBuilder.Entity<ServerMember>().ToTable("Server_Members");
+            modelBuilder.Entity<ServerMember>()
+                .Property(member => member.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerMember>()
+                .Property(member => member.Username)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerMember>()
+                .Property(member => member.Role)
+                .HasMaxLength(40);
             modelBuilder.Entity<ServerMember>()
                 .Property(member => member.IsMuted)
                 .HasDefaultValue(false);
             modelBuilder.Entity<ServerMember>()
                 .Property(member => member.OnboardingCompletedAt)
                 .HasColumnType("datetime2");
+            modelBuilder.Entity<ServerMember>()
+                .HasIndex(member => new { member.ServerId, member.Username });
+            modelBuilder.Entity<ServerMember>()
+                .HasIndex(member => new { member.Username, member.ServerId });
             modelBuilder.Entity<Channel>().ToTable("Channels");
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.CategoryId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.Name)
+                .HasMaxLength(120);
+            modelBuilder.Entity<Channel>()
+                .Property(channel => channel.Type)
+                .HasMaxLength(32);
             modelBuilder.Entity<Channel>()
                 .Property(channel => channel.ViewAccessRestricted)
                 .HasDefaultValue(false);
@@ -294,6 +370,18 @@ namespace DiscordCloneServer.Data
                 .HasColumnType("nvarchar(max)")
                 .HasDefaultValue("[]");
             modelBuilder.Entity<Category>().ToTable("Categories");
+            modelBuilder.Entity<Channel>()
+                .HasIndex(channel => new { channel.ServerId, channel.Position });
+            modelBuilder.Entity<Channel>()
+                .HasIndex(channel => new { channel.CategoryId, channel.Position });
+            modelBuilder.Entity<Category>()
+                .Property(category => category.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<Category>()
+                .Property(category => category.Name)
+                .HasMaxLength(120);
+            modelBuilder.Entity<Category>()
+                .HasIndex(category => new { category.ServerId, category.Position });
             modelBuilder.Entity<ServerRole>().ToTable("Server_Roles");
             modelBuilder.Entity<ServerRole>()
                 .Property(role => role.Color)
@@ -308,8 +396,60 @@ namespace DiscordCloneServer.Data
                 .IsUnique();
             modelBuilder.Entity<ServerInvite>().ToTable("Server_Invites");
             modelBuilder.Entity<ServerInvite>()
+                .Property(invite => invite.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerInvite>()
                 .HasIndex(invite => invite.Code)
                 .IsUnique();
+            modelBuilder.Entity<ServerInvite>()
+                .HasIndex(invite => new { invite.ServerId, invite.RevokedAt, invite.ExpiresAt });
+            modelBuilder.Entity<ServerInvite>()
+                .Property(invite => invite.AbuseReason)
+                .HasMaxLength(64);
+            modelBuilder.Entity<ServerInviteUse>().ToTable("Server_Invite_Uses");
+            modelBuilder.Entity<ServerInviteUse>()
+                .Property(use => use.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerInviteUse>()
+                .Property(use => use.InviteId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerInviteUse>()
+                .Property(use => use.InviteCode)
+                .HasMaxLength(64);
+            modelBuilder.Entity<ServerInviteUse>()
+                .Property(use => use.JoinedUsername)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerInviteUse>()
+                .Property(use => use.IpAddressHash)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerInviteUse>()
+                .Property(use => use.ReasonCode)
+                .HasMaxLength(64);
+            modelBuilder.Entity<ServerInviteUse>()
+                .HasIndex(use => new { use.InviteId, use.UsedAt });
+            modelBuilder.Entity<ServerInviteUse>()
+                .HasIndex(use => new { use.ServerId, use.IpAddressHash, use.UsedAt });
+            modelBuilder.Entity<ServerAutoModRule>().ToTable("Server_AutoMod_Rules");
+            modelBuilder.Entity<ServerAutoModRule>()
+                .Property(rule => rule.ServerId)
+                .HasMaxLength(128);
+            modelBuilder.Entity<ServerAutoModRule>()
+                .Property(rule => rule.Name)
+                .HasMaxLength(80);
+            modelBuilder.Entity<ServerAutoModRule>()
+                .Property(rule => rule.TriggerType)
+                .HasMaxLength(32);
+            modelBuilder.Entity<ServerAutoModRule>()
+                .Property(rule => rule.TriggerValue)
+                .HasMaxLength(1000);
+            modelBuilder.Entity<ServerAutoModRule>()
+                .Property(rule => rule.ActionType)
+                .HasMaxLength(32);
+            modelBuilder.Entity<ServerAutoModRule>()
+                .Property(rule => rule.CreatedBy)
+                .HasMaxLength(256);
+            modelBuilder.Entity<ServerAutoModRule>()
+                .HasIndex(rule => new { rule.ServerId, rule.IsEnabled });
             modelBuilder.Entity<ServerEmoji>().ToTable("Server_Emojis");
             modelBuilder.Entity<ServerEmoji>()
                 .Property(emoji => emoji.ServerId)
@@ -465,6 +605,9 @@ namespace DiscordCloneServer.Data
                 .Property(report => report.MessagePreview)
                 .HasMaxLength(500);
             modelBuilder.Entity<UserReport>()
+                .Property(report => report.ReporterBlockedTarget)
+                .HasDefaultValue(false);
+            modelBuilder.Entity<UserReport>()
                 .Property(report => report.Status)
                 .HasMaxLength(32);
             modelBuilder.Entity<UserReport>()
@@ -475,6 +618,8 @@ namespace DiscordCloneServer.Data
                 .HasMaxLength(1000);
             modelBuilder.Entity<UserReport>()
                 .HasIndex(report => new { report.ServerId, report.Status, report.CreatedAt });
+            modelBuilder.Entity<UserReport>()
+                .HasIndex(report => new { report.ServerId, report.TargetUsername, report.Status, report.CreatedAt });
             modelBuilder.Entity<UserReport>()
                 .HasIndex(report => new { report.ReportedByUsername, report.CreatedAt });
 
