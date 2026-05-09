@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net.WebSockets;
 using System.Text;
 using DiscordCloneServer.Data;
@@ -19,17 +20,26 @@ namespace DiscordCloneServer.Controllers
         private readonly ApiContext _context;
         private readonly IConfiguration _config;
         private readonly IEmailNotificationSender? _emailNotificationSender;
+        private readonly ISpamDetectionService? _spamDetectionService;
+        private readonly IBackgroundJobQueue? _backgroundJobQueue;
+        private readonly IMessageNotificationService? _messageNotificationService;
 
         private static readonly ConcurrentDictionary<string, WebSocket> ActiveSockets = new();
 
         public PrivateMessageFriendController(
             ApiContext context,
             IConfiguration config,
-            IEmailNotificationSender? emailNotificationSender = null)
+            IEmailNotificationSender? emailNotificationSender = null,
+            ISpamDetectionService? spamDetectionService = null,
+            IBackgroundJobQueue? backgroundJobQueue = null,
+            IMessageNotificationService? messageNotificationService = null)
         {
             _context = context;
             _config = config;
             _emailNotificationSender = emailNotificationSender;
+            _spamDetectionService = spamDetectionService;
+            _backgroundJobQueue = backgroundJobQueue;
+            _messageNotificationService = messageNotificationService;
         }
 
         [HttpPost]
@@ -76,6 +86,16 @@ namespace DiscordCloneServer.Controllers
                 return Conflict(new { message = "Duplicate PrivateMessageID" });
             }
 
+            var spamBlock = await RejectSpamIfDetected(new SpamDetectionRequest(
+                "dm",
+                BuildDmScopeId(username, privateMessageFriend.MessageUserReciver),
+                username,
+                privateMessageFriend.FriendMessagesData,
+                privateMessageFriend.AttachmentUrl,
+                privateMessageFriend.MessageUserReciver));
+            if (spamBlock != null)
+                return spamBlock;
+
             _context.PrivateMessageFriends.Add(privateMessageFriend);
             if (pollDraft != null)
             {
@@ -83,7 +103,7 @@ namespace DiscordCloneServer.Controllers
             }
 
             await _context.SaveChangesAsync();
-            await SendPrivateEmailNotification(privateMessageFriend);
+            await DispatchPrivateEmailNotification(privateMessageFriend);
             var pollLookup = await MessagePollService.GetPollLookupAsync(
                 _context,
                 "dm",
@@ -527,6 +547,17 @@ namespace DiscordCloneServer.Controllers
                         continue;
                     }
 
+                    if (await IsSpamDetected(new SpamDetectionRequest(
+                            "dm",
+                            BuildDmScopeId(username, privateMessage.MessageUserReciver),
+                            username,
+                            privateMessage.FriendMessagesData,
+                            privateMessage.AttachmentUrl,
+                            privateMessage.MessageUserReciver)))
+                    {
+                        continue;
+                    }
+
                     _context.PrivateMessageFriends.Add(privateMessage);
                     if (pollDraft != null)
                     {
@@ -534,7 +565,7 @@ namespace DiscordCloneServer.Controllers
                     }
 
                     await _context.SaveChangesAsync();
-                    await SendPrivateEmailNotification(privateMessage);
+                    await DispatchPrivateEmailNotification(privateMessage);
 
                     var pollLookup = await MessagePollService.GetPollLookupAsync(
                         _context,
@@ -601,6 +632,67 @@ namespace DiscordCloneServer.Controllers
         {
             return ((ICollection<KeyValuePair<string, WebSocket>>)ActiveSockets)
                 .Remove(new KeyValuePair<string, WebSocket>(username, webSocket));
+        }
+
+        private async Task<IActionResult?> RejectSpamIfDetected(SpamDetectionRequest request)
+        {
+            if (_spamDetectionService == null)
+            {
+                return null;
+            }
+
+            var result = await _spamDetectionService.CheckAsync(request, HttpContext.RequestAborted);
+            if (result.Allowed)
+            {
+                return null;
+            }
+
+            if (result.RetryAfterSeconds > 0)
+            {
+                Response.Headers.RetryAfter = result.RetryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+            }
+
+            return StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                message = result.Message,
+                reason = result.ReasonCode,
+                retryAfterSeconds = result.RetryAfterSeconds
+            });
+        }
+
+        private async Task<bool> IsSpamDetected(SpamDetectionRequest request)
+        {
+            if (_spamDetectionService == null)
+            {
+                return false;
+            }
+
+            var result = await _spamDetectionService.CheckAsync(request, HttpContext.RequestAborted);
+            return !result.Allowed;
+        }
+
+        private async Task DispatchPrivateEmailNotification(PrivateMessageFriend privateMessage)
+        {
+            if (_messageNotificationService != null)
+            {
+                if (_backgroundJobQueue?.TryQueue(async (services, cancellationToken) =>
+                {
+                    var notifications = services.GetRequiredService<IMessageNotificationService>();
+                    await notifications.SendPrivateEmailNotificationAsync(
+                        privateMessage.PrivateMessageID,
+                        cancellationToken);
+                }) == true)
+                {
+                    return;
+                }
+
+                await _messageNotificationService.SendPrivateEmailNotificationAsync(
+                    privateMessage.PrivateMessageID,
+                    HttpContext.RequestAborted);
+                return;
+            }
+
+            await SendPrivateEmailNotification(privateMessage);
         }
 
         private async Task SendPrivateEmailNotification(PrivateMessageFriend privateMessage)
