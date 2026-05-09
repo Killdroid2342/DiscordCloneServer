@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace DiscordCloneServer.Controllers
 {
@@ -22,10 +23,20 @@ namespace DiscordCloneServer.Controllers
             RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
 
         private readonly IHttpClientFactory _httpClientFactory;
+        private readonly IMemoryCache? _cache;
+        private readonly TimeSpan _cacheDuration;
 
-        public LinkPreviewController(IHttpClientFactory httpClientFactory)
+        public LinkPreviewController(
+            IHttpClientFactory httpClientFactory,
+            IMemoryCache? cache = null,
+            IConfiguration? configuration = null)
         {
             _httpClientFactory = httpClientFactory;
+            _cache = cache;
+            _cacheDuration = TimeSpan.FromMinutes(Math.Clamp(
+                configuration?.GetValue<int?>("Caching:LinkPreviewMinutes") ?? 30,
+                0,
+                24 * 60));
         }
 
         [HttpGet]
@@ -41,6 +52,15 @@ namespace DiscordCloneServer.Controllers
             if (!await IsPublicHttpUrl(uri))
             {
                 return BadRequest(new { message = "URL is not available for previews." });
+            }
+
+            var cacheKey = $"link-preview:{uri.AbsoluteUri}";
+            if (_cacheDuration > TimeSpan.Zero &&
+                _cache != null &&
+                _cache.TryGetValue<LinkPreviewResponse>(cacheKey, out var cachedPreview))
+            {
+                Response.Headers["X-Cache"] = "HIT";
+                return Ok(cachedPreview);
             }
 
             try
@@ -63,7 +83,7 @@ namespace DiscordCloneServer.Controllers
                 if (!mediaType.Contains("html", StringComparison.OrdinalIgnoreCase))
                 {
                     var directPreviewType = GetPreviewTypeForMedia(mediaType);
-                    return Ok(new
+                    return Ok(CachePreview(cacheKey, new LinkPreviewResponse
                     {
                         url = uri.ToString(),
                         siteName = uri.Host,
@@ -73,9 +93,9 @@ namespace DiscordCloneServer.Controllers
                         type = directPreviewType,
                         mediaUrl = uri.ToString(),
                         mediaContentType = mediaType,
-                        accentColor = (string?)null,
-                        icon = (string?)null
-                    });
+                        accentColor = null,
+                        icon = null
+                    }));
                 }
 
                 await using var stream = await response.Content.ReadAsStreamAsync(HttpContext.RequestAborted);
@@ -105,25 +125,43 @@ namespace DiscordCloneServer.Controllers
                 var icon = ResolvePreviewUrl(uri, Decode(IconLinkRegex.Match(html).Groups["value"].Value));
                 var previewType = GetPreviewType(meta.GetValueOrDefault("og:type"), mediaUrl);
 
-                return Ok(new
+                return Ok(CachePreview(cacheKey, new LinkPreviewResponse
                 {
                     url = uri.ToString(),
                     siteName = meta.GetValueOrDefault("og:site_name") ?? uri.Host,
-                    title,
-                    description,
-                    image,
+                    title = title,
+                    description = description,
+                    image = image,
                     type = previewType,
-                    mediaUrl,
-                    mediaContentType = (string?)null,
+                    mediaUrl = mediaUrl,
+                    mediaContentType = null,
                     accentColor = NormalizeColor(meta.GetValueOrDefault("theme-color")),
-                    icon
-                });
+                    icon = icon
+                }));
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"link preview failed: {ex.Message}");
                 return StatusCode(502, new { message = "Could not fetch link preview." });
             }
+        }
+
+        private LinkPreviewResponse CachePreview(string cacheKey, LinkPreviewResponse preview)
+        {
+            if (_cacheDuration <= TimeSpan.Zero || _cache == null)
+            {
+                return preview;
+            }
+
+            _cache.Set(
+                cacheKey,
+                preview,
+                new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = _cacheDuration
+                });
+            Response.Headers["X-Cache"] = "MISS";
+            return preview;
         }
 
         private static Dictionary<string, string> ExtractMeta(string html)
@@ -294,6 +332,20 @@ namespace DiscordCloneServer.Controllers
             }
 
             return false;
+        }
+
+        private sealed class LinkPreviewResponse
+        {
+            public string url { get; init; } = string.Empty;
+            public string siteName { get; init; } = string.Empty;
+            public string title { get; init; } = string.Empty;
+            public string description { get; init; } = string.Empty;
+            public string? image { get; init; }
+            public string type { get; init; } = "article";
+            public string? mediaUrl { get; init; }
+            public string? mediaContentType { get; init; }
+            public string? accentColor { get; init; }
+            public string? icon { get; init; }
         }
     }
 }
