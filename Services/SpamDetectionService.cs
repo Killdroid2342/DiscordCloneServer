@@ -51,7 +51,89 @@ namespace DiscordCloneServer.Services
             _options = options.Value;
         }
 
+        public async Task<SpamDetectionResult> CheckAsync(
+            SpamDetectionRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            if (!_options.Enabled)
+            {
+                return SpamDetectionResult.Allow;
+            }
 
+            var text = request.MessageText?.Trim() ?? string.Empty;
+            var mentionCount = MentionRegex.Matches(text).Count;
+            if (mentionCount > Math.Max(1, _options.MaxMentionsPerMessage))
+            {
+                return Block(
+                    "mention-flood",
+                    "That message mentions too many people at once. Please trim it down.",
+                    Math.Max(15, _options.BurstWindowSeconds));
+            }
+
+            if (HasRepeatedCharacterRun(text, Math.Max(4, _options.MaxRepeatedCharacterRun)) ||
+                HasRepeatedWordRun(text, Math.Max(4, _options.MaxRepeatedWordRun)))
+            {
+                return Block(
+                    "repeated-content",
+                    "That message looks repetitive. Please rewrite it before sending.",
+                    Math.Max(15, _options.BurstWindowSeconds));
+            }
+
+            var now = DateTime.UtcNow;
+            var lookbackSeconds = new[]
+            {
+                _options.BurstWindowSeconds,
+                _options.DuplicateWindowSeconds,
+                _options.LinkWindowSeconds
+            }.Max();
+            var lookbackCutoff = now.AddSeconds(-Math.Max(1, lookbackSeconds));
+            var recentMessages = (await GetRecentMessagesAsync(request, cancellationToken))
+                .Where(message => message.CreatedAt >= lookbackCutoff)
+                .ToList();
+
+            var burstCutoff = now.AddSeconds(-Math.Max(1, _options.BurstWindowSeconds));
+            var burstCount = recentMessages.Count(message => message.CreatedAt >= burstCutoff) + 1;
+            if (burstCount > Math.Max(1, _options.BurstMessageLimit))
+            {
+                return Block(
+                    "message-burst",
+                    "You are sending messages too quickly. Please slow down.",
+                    Math.Max(1, _options.BurstWindowSeconds));
+            }
+
+            var contentKey = NormalizeContentKey(text, request.AttachmentUrl);
+            if (!string.IsNullOrWhiteSpace(contentKey))
+            {
+                var duplicateCutoff = now.AddSeconds(-Math.Max(1, _options.DuplicateWindowSeconds));
+                var duplicateCount = recentMessages.Count(message =>
+                    message.CreatedAt >= duplicateCutoff &&
+                    NormalizeContentKey(message.Text, message.AttachmentUrl) == contentKey) + 1;
+                if (duplicateCount >= Math.Max(2, _options.DuplicateMessageLimit))
+                {
+                    return Block(
+                        "duplicate-message",
+                        "That message has been repeated too many times. Please wait before sending it again.",
+                        Math.Max(1, _options.DuplicateWindowSeconds));
+                }
+            }
+
+            var linkCutoff = now.AddSeconds(-Math.Max(1, _options.LinkWindowSeconds));
+            var linkCount = recentMessages.Count(message =>
+                message.CreatedAt >= linkCutoff &&
+                ContainsLink(message.Text, message.AttachmentUrl)) +
+                (ContainsLink(text, request.AttachmentUrl) ? 1 : 0);
+            if (linkCount > Math.Max(1, _options.LinkMessageLimit))
+            {
+                return Block(
+                    "link-burst",
+                    "You are sharing links too quickly. Please wait before posting another link.",
+                    Math.Max(1, _options.LinkWindowSeconds));
+            }
+
+            return SpamDetectionResult.Allow;
+        }
+
+        
         private static SpamDetectionResult Block(string reasonCode, string message, int retryAfterSeconds)
         {
             return new SpamDetectionResult(false, reasonCode, message, retryAfterSeconds);
