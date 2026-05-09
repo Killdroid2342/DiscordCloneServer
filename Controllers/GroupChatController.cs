@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -19,14 +20,23 @@ namespace DiscordCloneServer.Controllers
     {
         private readonly ApiContext _context;
         private readonly IEmailNotificationSender? _emailNotificationSender;
+        private readonly ISpamDetectionService? _spamDetectionService;
+        private readonly IBackgroundJobQueue? _backgroundJobQueue;
+        private readonly IMessageNotificationService? _messageNotificationService;
         private static readonly ConcurrentDictionary<string, WebSocket> ActiveSockets = new();
 
         public GroupChatController(
             ApiContext context,
-            IEmailNotificationSender? emailNotificationSender = null)
+            IEmailNotificationSender? emailNotificationSender = null,
+            ISpamDetectionService? spamDetectionService = null,
+            IBackgroundJobQueue? backgroundJobQueue = null,
+            IMessageNotificationService? messageNotificationService = null)
         {
             _context = context;
             _emailNotificationSender = emailNotificationSender;
+            _spamDetectionService = spamDetectionService;
+            _backgroundJobQueue = backgroundJobQueue;
+            _messageNotificationService = messageNotificationService;
         }
 
         [HttpPost]
@@ -420,6 +430,15 @@ namespace DiscordCloneServer.Controllers
                     return BadRequest(new { message = "Reply target was not found in this group." });
             }
 
+            var spamBlock = await RejectSpamIfDetected(new SpamDetectionRequest(
+                "group",
+                request.GroupId.ToString(),
+                currentUsername,
+                content,
+                attachmentUrl));
+            if (spamBlock != null)
+                return spamBlock;
+
             var message = new GroupMessage
             {
                 Id = Guid.NewGuid(),
@@ -450,7 +469,7 @@ namespace DiscordCloneServer.Controllers
                 replyTarget,
                 pollLookup.GetValueOrDefault(message.Id.ToString()));
             await BroadcastToGroup(message.GroupId, JsonSerializer.Serialize(response));
-            await SendGroupEmailNotifications(message);
+            await DispatchGroupEmailNotifications(message);
             return Ok(response);
         }
 
@@ -748,6 +767,16 @@ namespace DiscordCloneServer.Controllers
                         groupMessage.Date = DateTime.UtcNow.ToString("O");
                         groupMessage.AttachmentUrl = NormalizeOptional(groupMessage.AttachmentUrl);
                         groupMessage.AttachmentContentType = NormalizeOptional(groupMessage.AttachmentContentType);
+                        if (await IsSpamDetected(new SpamDetectionRequest(
+                                "group",
+                                groupMessage.GroupId.ToString(),
+                                username,
+                                groupMessage.Content,
+                                groupMessage.AttachmentUrl)))
+                        {
+                            continue;
+                        }
+
                         _context.GroupMessages.Add(groupMessage);
                         if (pollDraft != null)
                         {
@@ -768,7 +797,7 @@ namespace DiscordCloneServer.Controllers
                                 Array.Empty<MessageReaction>(),
                                 null,
                                 pollLookup.GetValueOrDefault(groupMessage.Id.ToString()))));
-                        await SendGroupEmailNotifications(groupMessage);
+                        await DispatchGroupEmailNotifications(groupMessage);
                         continue;
                     }
 
@@ -858,6 +887,67 @@ namespace DiscordCloneServer.Controllers
         {
             return ((ICollection<KeyValuePair<string, WebSocket>>)ActiveSockets)
                 .Remove(new KeyValuePair<string, WebSocket>(username, webSocket));
+        }
+
+        private async Task<IActionResult?> RejectSpamIfDetected(SpamDetectionRequest request)
+        {
+            if (_spamDetectionService == null)
+            {
+                return null;
+            }
+
+            var result = await _spamDetectionService.CheckAsync(request, HttpContext.RequestAborted);
+            if (result.Allowed)
+            {
+                return null;
+            }
+
+            if (result.RetryAfterSeconds > 0)
+            {
+                Response.Headers.RetryAfter = result.RetryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+            }
+
+            return StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                message = result.Message,
+                reason = result.ReasonCode,
+                retryAfterSeconds = result.RetryAfterSeconds
+            });
+        }
+
+        private async Task<bool> IsSpamDetected(SpamDetectionRequest request)
+        {
+            if (_spamDetectionService == null)
+            {
+                return false;
+            }
+
+            var result = await _spamDetectionService.CheckAsync(request, HttpContext.RequestAborted);
+            return !result.Allowed;
+        }
+
+        private async Task DispatchGroupEmailNotifications(GroupMessage message)
+        {
+            if (_messageNotificationService != null)
+            {
+                if (_backgroundJobQueue?.TryQueue(async (services, cancellationToken) =>
+                {
+                    var notifications = services.GetRequiredService<IMessageNotificationService>();
+                    await notifications.SendGroupEmailNotificationsAsync(
+                        message.Id.ToString(),
+                        cancellationToken);
+                }) == true)
+                {
+                    return;
+                }
+
+                await _messageNotificationService.SendGroupEmailNotificationsAsync(
+                    message.Id.ToString(),
+                    HttpContext.RequestAborted);
+                return;
+            }
+
+            await SendGroupEmailNotifications(message);
         }
 
         private async Task SendGroupEmailNotifications(GroupMessage message)
