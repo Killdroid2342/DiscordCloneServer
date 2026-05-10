@@ -96,7 +96,97 @@ namespace DiscordCloneServer.Services
             }
         }
 
-        
+        public async Task SendPrivateEmailNotificationAsync(
+            string messageId,
+            CancellationToken cancellationToken = default)
+        {
+            var message = await _context.PrivateMessageFriends.FirstOrDefaultAsync(
+                item => item.PrivateMessageID == messageId,
+                cancellationToken);
+            if (message == null)
+            {
+                return;
+            }
+
+            var recipient = await _context.Accounts.FirstOrDefaultAsync(
+                account => account.UserName == message.MessageUserReciver && !account.IsDisabled,
+                cancellationToken);
+            if (recipient == null)
+            {
+                return;
+            }
+
+            await SendSafelyAsync(
+                recipient,
+                new EmailNotificationRequest(
+                    message.MessagesUserSender,
+                    $"New message from {message.MessagesUserSender}",
+                    EmailNotificationPreferences.BuildPreview(
+                        message.FriendMessagesData,
+                        message.AttachmentUrl),
+                    "dm",
+                    message.MessagesUserSender,
+                    BuildDmScopeId(message.MessagesUserSender, message.MessageUserReciver),
+                    message.PrivateMessageID,
+                    ParseDate(message.Date)),
+                cancellationToken);
+        }
+
+        public async Task SendGroupEmailNotificationsAsync(
+            string messageId,
+            CancellationToken cancellationToken = default)
+        {
+            if (!Guid.TryParse(messageId, out var parsedMessageId))
+            {
+                return;
+            }
+
+            var message = await _context.GroupMessages.FirstOrDefaultAsync(
+                item => item.Id == parsedMessageId,
+                cancellationToken);
+            if (message == null)
+            {
+                return;
+            }
+
+            var group = await _context.GroupChats.FirstOrDefaultAsync(
+                item => item.Id == message.GroupId,
+                cancellationToken);
+            if (group == null)
+            {
+                return;
+            }
+
+            var recipientNames = group.Members
+                .Where(member => !string.Equals(member, message.Sender, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (recipientNames.Length == 0)
+            {
+                return;
+            }
+
+            var recipients = await _context.Accounts
+                .Where(account => recipientNames.Contains(account.UserName) && !account.IsDisabled)
+                .ToListAsync(cancellationToken);
+
+            foreach (var recipient in recipients)
+            {
+                await SendSafelyAsync(
+                    recipient,
+                    new EmailNotificationRequest(
+                        message.Sender,
+                        $"New message in {group.Name}",
+                        EmailNotificationPreferences.BuildPreview(message.Content, message.AttachmentUrl),
+                        "group",
+                        group.Name,
+                        group.Id.ToString(),
+                        message.Id.ToString(),
+                        ParseDate(message.Date)),
+                    cancellationToken);
+            }
+        }
+
         private async Task SendSafelyAsync(
             Account recipient,
             EmailNotificationRequest notification,
