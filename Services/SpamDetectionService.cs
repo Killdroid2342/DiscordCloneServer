@@ -133,7 +133,92 @@ namespace DiscordCloneServer.Services
             return SpamDetectionResult.Allow;
         }
 
-        
+        private async Task<IReadOnlyList<SpamMessageSnapshot>> GetRecentMessagesAsync(
+            SpamDetectionRequest request,
+            CancellationToken cancellationToken)
+        {
+            const int maxMessages = 100;
+            var scopeType = request.ScopeType.Trim().ToLowerInvariant();
+            var sender = request.SenderUsername.Trim();
+
+            if (scopeType == "server")
+            {
+                var messages = await _context.ServerMessages
+                    .Where(message => message.ChannelId == request.ScopeId && message.MessagesUserSender == sender)
+                    .OrderByDescending(message => message.Date)
+                    .Take(maxMessages)
+                    .Select(message => new { Text = message.userText, message.AttachmentUrl, message.Date })
+                    .ToListAsync(cancellationToken);
+
+                return messages
+                    .Select(message => new SpamMessageSnapshot(
+                        message.Text,
+                        message.AttachmentUrl,
+                        ParseDate(message.Date)))
+                    .ToList();
+            }
+
+            if (scopeType == "thread")
+            {
+                var messages = await _context.ServerThreadMessages
+                    .Where(message => message.ThreadId == request.ScopeId && message.MessagesUserSender == sender)
+                    .OrderByDescending(message => message.Date)
+                    .Take(maxMessages)
+                    .Select(message => new { Text = message.userText, message.AttachmentUrl, message.Date })
+                    .ToListAsync(cancellationToken);
+
+                return messages
+                    .Select(message => new SpamMessageSnapshot(
+                        message.Text,
+                        message.AttachmentUrl,
+                        ParseDate(message.Date)))
+                    .ToList();
+            }
+
+            if (scopeType == "dm")
+            {
+                var recipient = request.RecipientUsername?.Trim();
+                var query = _context.PrivateMessageFriends
+                    .Where(message => message.MessagesUserSender == sender);
+                if (!string.IsNullOrWhiteSpace(recipient))
+                {
+                    query = query.Where(message => message.MessageUserReciver == recipient);
+                }
+
+                var messages = await query
+                    .OrderByDescending(message => message.Date)
+                    .Take(maxMessages)
+                    .Select(message => new { Text = message.FriendMessagesData, message.AttachmentUrl, message.Date })
+                    .ToListAsync(cancellationToken);
+
+                return messages
+                    .Select(message => new SpamMessageSnapshot(
+                        message.Text,
+                        message.AttachmentUrl,
+                        ParseDate(message.Date)))
+                    .ToList();
+            }
+
+            if (scopeType == "group" && Guid.TryParse(request.ScopeId, out var groupId))
+            {
+                var messages = await _context.GroupMessages
+                    .Where(message => message.GroupId == groupId && message.Sender == sender)
+                    .OrderByDescending(message => message.Date)
+                    .Take(maxMessages)
+                    .Select(message => new { Text = message.Content, message.AttachmentUrl, message.Date })
+                    .ToListAsync(cancellationToken);
+
+                return messages
+                    .Select(message => new SpamMessageSnapshot(
+                        message.Text,
+                        message.AttachmentUrl,
+                        ParseDate(message.Date)))
+                    .ToList();
+            }
+
+            return Array.Empty<SpamMessageSnapshot>();
+        }
+
         private static SpamDetectionResult Block(string reasonCode, string message, int retryAfterSeconds)
         {
             return new SpamDetectionResult(false, reasonCode, message, retryAfterSeconds);
