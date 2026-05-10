@@ -9,11 +9,14 @@ namespace DiscordCloneServer.Controllers
     [Authorize]
     public class UploadController : ControllerBase
     {
+        private const int UploadCacheSeconds = 31536000;
         private readonly IWebHostEnvironment _environment;
+        private readonly string _cdnBaseUrl;
 
-        public UploadController(IWebHostEnvironment environment)
+        public UploadController(IWebHostEnvironment environment, IConfiguration? configuration = null)
         {
             _environment = environment;
+            _cdnBaseUrl = (configuration?["Cdn:BaseUrl"] ?? string.Empty).TrimEnd('/');
         }
 
         [HttpPost("UploadImage")]
@@ -82,7 +85,15 @@ namespace DiscordCloneServer.Controllers
             }
 
             var fileUrl = $"/uploads/{uniqueFileName}";
-            return Ok(new { url = fileUrl });
+            var cdnUrl = string.IsNullOrWhiteSpace(_cdnBaseUrl)
+                ? fileUrl
+                : $"{_cdnBaseUrl}{fileUrl}";
+            return Ok(new
+            {
+                url = fileUrl,
+                cdnUrl,
+                cacheControl = $"public,max-age={UploadCacheSeconds},immutable"
+            });
         }
 
         private static bool HasAllowedImageSignature(IFormFile file)
