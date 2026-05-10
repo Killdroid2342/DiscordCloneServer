@@ -13,6 +13,9 @@ namespace DiscordCloneServer.Models
         public DateTime? ExpiresAt { get; set; }
         public int? MaxUses { get; set; }
         public int Uses { get; set; }
+        public DateTime? LastUsedAt { get; set; }
+        public DateTime? AbuseDetectedAt { get; set; }
+        public string? AbuseReason { get; set; }
         public DateTime? RevokedAt { get; set; }
     }
 }
