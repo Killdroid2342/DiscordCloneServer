@@ -17,6 +17,7 @@ namespace DiscordCloneServer.Models
         public string Reason { get; set; } = string.Empty;
         public string? Description { get; set; }
         public string? MessagePreview { get; set; }
+        public bool ReporterBlockedTarget { get; set; }
         public string Status { get; set; } = "open";
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public string? ReviewedByUsername { get; set; }
