@@ -50,7 +50,37 @@ namespace DiscordCloneServer.Services
             RecordEndpointProfile(statusCode, safeElapsedMilliseconds, method, path);
         }
 
+        public PerformanceProfileSnapshot ProfileSnapshot(int endpointLimit = 20)
+        {
+            EndpointPerformanceSnapshot[] endpoints;
+            lock (_endpointProfilesLock)
+            {
+                endpoints = _endpointProfiles.Values
+                    .Select(profile => profile.ToSnapshot())
+                    .ToArray();
+            }
+
+            var boundedLimit = Math.Clamp(endpointLimit, 1, 100);
+
+            return new PerformanceProfileSnapshot(
+                StartedAtUtc,
+                DateTimeOffset.UtcNow,
+                endpoints.Sum(endpoint => endpoint.TotalRequests),
+                endpoints
+                    .OrderByDescending(endpoint => endpoint.AverageDurationMs)
+                    .ThenByDescending(endpoint => endpoint.MaxDurationMs)
+                    .Take(boundedLimit)
+                    .ToArray(),
+                endpoints
+                    .OrderByDescending(endpoint => endpoint.TotalRequests)
+                    .ThenByDescending(endpoint => endpoint.AverageDurationMs)
+                    .Take(boundedLimit)
+                    .ToArray());
+        }
+
         
+
+
     }
 
     public sealed record MonitoringSnapshot(
