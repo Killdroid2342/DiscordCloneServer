@@ -78,7 +78,40 @@ namespace DiscordCloneServer.Services
                     .ToArray());
         }
 
-        
+        private void RecordEndpointProfile(int statusCode, long elapsedMilliseconds, string? method, string? path)
+        {
+            if (string.IsNullOrWhiteSpace(method) || string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            var normalizedMethod = method.Trim().ToUpperInvariant();
+            var normalizedPath = NormalizePath(path);
+            var key = $"{normalizedMethod} {normalizedPath}";
+
+            lock (_endpointProfilesLock)
+            {
+                if (!_endpointProfiles.TryGetValue(key, out var profile))
+                {
+                    if (_endpointProfiles.Count >= MaxProfiledEndpoints)
+                    {
+                        var removableKey = _endpointProfiles
+                            .OrderBy(item => item.Value.LastSeenUtc)
+                            .Select(item => item.Key)
+                            .FirstOrDefault();
+                        if (!string.IsNullOrWhiteSpace(removableKey))
+                        {
+                            _endpointProfiles.Remove(removableKey);
+                        }
+                    }
+
+                    profile = new EndpointPerformanceAccumulator(normalizedMethod, normalizedPath);
+                    _endpointProfiles[key] = profile;
+                }
+
+                profile.Record(statusCode, elapsedMilliseconds);
+            }
+        }
 
 
     }
