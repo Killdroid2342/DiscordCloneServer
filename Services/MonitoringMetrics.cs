@@ -113,7 +113,16 @@ namespace DiscordCloneServer.Services
             }
         }
 
+        private static string NormalizePath(string path)
+        {
+            var normalized = path.Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return "/";
+            }
 
+            return normalized.StartsWith("/", StringComparison.Ordinal) ? normalized : $"/{normalized}";
+        }
     }
 
     public sealed record MonitoringSnapshot(
