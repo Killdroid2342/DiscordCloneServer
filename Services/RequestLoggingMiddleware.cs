@@ -44,7 +44,11 @@ namespace DiscordCloneServer.Services
             catch (Exception ex)
             {
                 stopwatch.Stop();
-                _metrics.RecordRequest(StatusCodes.Status500InternalServerError, stopwatch.ElapsedMilliseconds);
+                _metrics.RecordRequest(
+                    StatusCodes.Status500InternalServerError,
+                    stopwatch.ElapsedMilliseconds,
+                    context.Request.Method,
+                    GetSafePath(context.Request));
                 _logger.LogError(
                     ex,
                     "Unhandled request failure {Method} {Path} after {ElapsedMs}ms",
@@ -56,7 +60,11 @@ namespace DiscordCloneServer.Services
 
             stopwatch.Stop();
             var statusCode = context.Response.StatusCode;
-            _metrics.RecordRequest(statusCode, stopwatch.ElapsedMilliseconds);
+            _metrics.RecordRequest(
+                statusCode,
+                stopwatch.ElapsedMilliseconds,
+                context.Request.Method,
+                GetSafePath(context.Request));
 
             var level = GetLogLevel(statusCode, stopwatch.ElapsedMilliseconds, _slowRequestThresholdMs);
             _logger.Log(
