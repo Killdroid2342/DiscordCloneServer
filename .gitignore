@@ -1,0 +1,42 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+publish/
+artifacts/
+
+# Logs and diagnostics
+*.log
+*.binlog
+logs/
+
+# Test and coverage output
+TestResults/
+test-results/
+coverage/
+coverage*.json
+coverage*.xml
+coverage*.info
+
+# Local config and secrets
+.env
+.env.*
+*.local
+*.pfx
+*.publishsettings
+*.pubxml
+*.azurePubxml
+appsettings.*.local.json
+
+# IDE and OS files
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.user
+*.rsuser
+*.sw?
