@@ -581,7 +581,7 @@ namespace DiscordCloneServer.Controllers
         }
 
         [HttpPost]
-        public IActionResult DeleteAccount([FromBody] AccountPasswordRequest request)
+        public IActionResult DeleteAccount([FromBody] AccountDeletionRequest request)
         {
             try
             {
@@ -589,6 +589,17 @@ namespace DiscordCloneServer.Controllers
                 if (account == null)
                 {
                     return NotFound(new { message = "Account not found." });
+                }
+
+                if (!request.AcknowledgedWarnings)
+                {
+                    return BadRequest(new { message = "Review and acknowledge the account deletion warnings before continuing." });
+                }
+
+                if (!string.Equals(NormalizeUsername(request.Username), account.UserName, StringComparison.Ordinal) ||
+                    !string.Equals(NormalizeUsername(request.ConfirmationUsername), account.UserName, StringComparison.Ordinal))
+                {
+                    return BadRequest(new { message = "Type your username exactly to confirm account deletion." });
                 }
 
                 if (PasswordHasher.VerifyPassword(account.PassWord, request.Password) == PasswordVerificationResult.Failed)
@@ -1299,6 +1310,18 @@ namespace DiscordCloneServer.Controllers
             var safeUsername = Regex.Replace(username, "[^A-Za-z0-9_.-]", "_");
             var fileName = $"{safeUsername}-mydiscord-export-{exportedAt:yyyyMMddHHmmss}.json";
             return File(jsonBytes, "application/json", fileName);
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetAccountDeletionPreview()
+        {
+            var account = GetCurrentAccount();
+            if (account == null)
+            {
+                return NotFound(new { message = "Account not found." });
+            }
+
+            return Ok(await BuildAccountDeletionPreviewAsync(account));
         }
 
         [HttpPost]
@@ -2400,6 +2423,54 @@ namespace DiscordCloneServer.Controllers
             };
         }
 
+        private async Task<AccountDeletionPreviewResponse> BuildAccountDeletionPreviewAsync(Account account)
+        {
+            var username = account.UserName;
+            var exportedAt = DateTime.UtcNow;
+            var groupChats = (await _context.GroupChats.ToListAsync())
+                .Where(group => ContainsValue(group.Members, username))
+                .ToList();
+            var groupIds = groupChats.Select(group => group.Id).ToList();
+            var activeSessionCount = await _context.AccountSessions.CountAsync(session =>
+                (session.AccountId == account.Id || session.Username == username) &&
+                session.RevokedAt == null &&
+                session.ExpiresAt > exportedAt);
+
+            var summary = new AccountDeletionPreviewSummary
+            {
+                DirectMessageCount = await _context.PrivateMessageFriends.CountAsync(message =>
+                    message.MessagesUserSender == username || message.MessageUserReciver == username),
+                GroupChatCount = groupChats.Count,
+                GroupMessageCount = await _context.GroupMessages.CountAsync(message => groupIds.Contains(message.GroupId)),
+                ServerMembershipCount = await _context.ServerMembers.CountAsync(member => member.Username == username),
+                OwnedServerCount = await _context.CreateServers.CountAsync(server => server.ServerOwner == username),
+                AuthoredServerMessageCount = await _context.ServerMessages.CountAsync(message => message.MessagesUserSender == username),
+                AuthoredThreadMessageCount = await _context.ServerThreadMessages.CountAsync(message => message.MessagesUserSender == username),
+                ReportCount = await _context.UserReports.CountAsync(report =>
+                    report.ReportedByUsername == username || report.TargetUsername == username),
+                ActiveSessionCount = activeSessionCount,
+                OwnedOAuthApplicationCount = await _context.OAuthApplications.CountAsync(application => application.OwnerUsername == username),
+                AuthorizedApplicationCount = await _context.OAuthAppAuthorizations.CountAsync(authorization => authorization.Username == username)
+            };
+
+            return new AccountDeletionPreviewResponse
+            {
+                Username = username,
+                GeneratedAt = exportedAt,
+                ConfirmationText = username,
+                ExportAvailable = true,
+                Summary = summary,
+                Warnings = new[]
+                {
+                    "Account deletion is permanent after you confirm it.",
+                    "Download your data export first if you need a copy of your profile, settings, messages, reports, sessions, or app authorizations.",
+                    "Friends, pending requests, blocks, sessions, OAuth authorizations, and owned OAuth apps will be removed.",
+                    "Private direct messages involving you are deleted. Group and server messages you already sent may remain for conversation history and show as Deleted User.",
+                    "Servers you own are transferred to another member when possible, or deleted when no members remain."
+                }
+            };
+        }
+
         private AccountStandingResponse BuildAccountStandingResponse(Account account)
         {
             var trustScore = CalculateTrustScore(account, out var signals);
@@ -2526,6 +2597,31 @@ namespace DiscordCloneServer.Controllers
                 "suspended" => "This account has major restrictions applied.",
                 _ => "No restrictions are applied to this account."
             };
+        }
+
+        private sealed class AccountDeletionPreviewResponse
+        {
+            public string Username { get; set; } = string.Empty;
+            public DateTime GeneratedAt { get; set; }
+            public string ConfirmationText { get; set; } = string.Empty;
+            public bool ExportAvailable { get; set; }
+            public string[] Warnings { get; set; } = Array.Empty<string>();
+            public AccountDeletionPreviewSummary Summary { get; set; } = new();
+        }
+
+        private sealed class AccountDeletionPreviewSummary
+        {
+            public int DirectMessageCount { get; set; }
+            public int GroupChatCount { get; set; }
+            public int GroupMessageCount { get; set; }
+            public int ServerMembershipCount { get; set; }
+            public int OwnedServerCount { get; set; }
+            public int AuthoredServerMessageCount { get; set; }
+            public int AuthoredThreadMessageCount { get; set; }
+            public int ReportCount { get; set; }
+            public int ActiveSessionCount { get; set; }
+            public int OwnedOAuthApplicationCount { get; set; }
+            public int AuthorizedApplicationCount { get; set; }
         }
 
         private sealed class AccountStandingResponse
@@ -2705,6 +2801,28 @@ namespace DiscordCloneServer.Controllers
 
             var sessions = _context.AccountSessions.Where(session => session.AccountId == account.Id || session.Username == username).ToList();
             _context.AccountSessions.RemoveRange(sessions);
+
+            var ownedApplicationIds = _context.OAuthApplications
+                .Where(application => application.OwnerUsername == username)
+                .Select(application => application.Id)
+                .ToList();
+            var oauthCodes = _context.OAuthAuthorizationCodes
+                .Where(code => code.Username == username || ownedApplicationIds.Contains(code.ApplicationId))
+                .ToList();
+            var oauthTokens = _context.OAuthAccessTokens
+                .Where(token => token.Username == username || ownedApplicationIds.Contains(token.ApplicationId))
+                .ToList();
+            var oauthAuthorizations = _context.OAuthAppAuthorizations
+                .Where(authorization => authorization.Username == username || ownedApplicationIds.Contains(authorization.ApplicationId))
+                .ToList();
+            var oauthApplications = _context.OAuthApplications
+                .Where(application => ownedApplicationIds.Contains(application.Id))
+                .ToList();
+
+            _context.OAuthAuthorizationCodes.RemoveRange(oauthCodes);
+            _context.OAuthAccessTokens.RemoveRange(oauthTokens);
+            _context.OAuthAppAuthorizations.RemoveRange(oauthAuthorizations);
+            _context.OAuthApplications.RemoveRange(oauthApplications);
         }
 
         private void CleanupOwnedServerForDeletedUser(CreateServer server, string username)
@@ -3223,6 +3341,14 @@ namespace DiscordCloneServer.Controllers
     {
         public string Username { get; set; } = string.Empty;
         public string Password { get; set; } = string.Empty;
+    }
+
+    public class AccountDeletionRequest
+    {
+        public string Username { get; set; } = string.Empty;
+        public string ConfirmationUsername { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+        public bool AcknowledgedWarnings { get; set; }
     }
 
     public class RefreshTokenRequest
