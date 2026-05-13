@@ -120,6 +120,20 @@ namespace DiscordCloneServer.Services
             }
         }
 
-       
+        public EndpointPerformanceSnapshot ToSnapshot()
+        {
+            return new EndpointPerformanceSnapshot(
+                Method,
+                Path,
+                TotalRequests,
+                ClientErrorRequests,
+                ServerErrorRequests,
+                TotalDurationMs,
+                TotalRequests == 0 ? 0 : Math.Round(TotalDurationMs / (double)TotalRequests, 2),
+                MinDurationMs == long.MaxValue ? 0 : MinDurationMs,
+                MaxDurationMs,
+                LastDurationMs,
+                LastSeenUtc);
+        }
     }
 }
