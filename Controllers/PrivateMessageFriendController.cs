@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 using DiscordCloneServer.Data;
 using DiscordCloneServer.Models;
 using DiscordCloneServer.Services;
@@ -492,7 +493,7 @@ namespace DiscordCloneServer.Controllers
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
                     var messageJson = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    var privateMessage = Newtonsoft.Json.JsonConvert.DeserializeObject<PrivateMessageFriend>(messageJson);
+                    var privateMessage = JsonSerializer.Deserialize<PrivateMessageFriend>(messageJson);
                     if (privateMessage == null)
                     {
                         continue;
@@ -592,7 +593,7 @@ namespace DiscordCloneServer.Controllers
             if (ActiveSockets.TryGetValue(targetUsername, out var receiverSocket) &&
                 receiverSocket.State == WebSocketState.Open)
             {
-                var responseJson = Newtonsoft.Json.JsonConvert.SerializeObject(privateMessage);
+                var responseJson = JsonSerializer.Serialize(privateMessage);
                 var messageBuffer = Encoding.UTF8.GetBytes(responseJson);
                 try
                 {
