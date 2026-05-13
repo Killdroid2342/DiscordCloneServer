@@ -102,6 +102,24 @@ namespace DiscordCloneServer.Controllers
             return Content(content.ToString(), "text/plain; version=0.0.4; charset=utf-8");
         }
 
+        [HttpGet("profile")]
+        public IActionResult Profile([FromQuery] int top = 20)
+        {
+            var snapshot = _metrics.ProfileSnapshot(top);
+
+            return Ok(new
+            {
+                status = "ok",
+                service = "DiscordCloneServer",
+                timestampUtc = DateTimeOffset.UtcNow,
+                startedAtUtc = snapshot.StartedAtUtc,
+                generatedAtUtc = snapshot.GeneratedAtUtc,
+                totalProfiledRequests = snapshot.TotalProfiledRequests,
+                slowestEndpoints = snapshot.SlowestEndpoints.Select(ToEndpointPayload),
+                busiestEndpoints = snapshot.BusiestEndpoints.Select(ToEndpointPayload)
+            });
+        }
+
         private object BuildHealthPayload(DatabaseHealth database)
         {
             var snapshot = _metrics.Snapshot();
@@ -163,6 +181,24 @@ namespace DiscordCloneServer.Controllers
             builder.Append("# HELP ").Append(name).Append(' ').AppendLine(help);
             builder.Append("# TYPE ").Append(name).Append(' ').AppendLine(type);
             builder.Append(name).Append(' ').AppendLine(value.ToString("0.###", CultureInfo.InvariantCulture));
+        }
+
+        private static object ToEndpointPayload(EndpointPerformanceSnapshot endpoint)
+        {
+            return new
+            {
+                method = endpoint.Method,
+                path = endpoint.Path,
+                totalRequests = endpoint.TotalRequests,
+                clientErrors = endpoint.ClientErrorRequests,
+                serverErrors = endpoint.ServerErrorRequests,
+                totalDurationMs = endpoint.TotalDurationMs,
+                averageDurationMs = endpoint.AverageDurationMs,
+                minDurationMs = endpoint.MinDurationMs,
+                maxDurationMs = endpoint.MaxDurationMs,
+                lastDurationMs = endpoint.LastDurationMs,
+                lastSeenUtc = endpoint.LastSeenUtc
+            };
         }
 
         private sealed record DatabaseHealth(bool CanConnect, string Status, long LatencyMs);
