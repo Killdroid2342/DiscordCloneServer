@@ -3,6 +3,7 @@ using DiscordCloneServer.Data;
 using DiscordCloneServer.Services;
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
@@ -75,6 +76,30 @@ namespace DiscordCloneServer
             {
                 throw new InvalidOperationException("Jwt:Issuer and Jwt:Key must be configured. Store Jwt:Key in user secrets or the JWT__KEY environment variable, not appsettings.json.");
             }
+            if (Encoding.UTF8.GetByteCount(jwtKey) < 32)
+            {
+                throw new InvalidOperationException("Jwt:Key must be at least 32 bytes for production-grade HMAC signing.");
+            }
+
+            builder.Services.Configure<ForwardedHeadersOptions>(options =>
+            {
+                options.ForwardedHeaders =
+                    ForwardedHeaders.XForwardedFor |
+                    ForwardedHeaders.XForwardedProto |
+                    ForwardedHeaders.XForwardedHost;
+                options.ForwardLimit = 2;
+                options.KnownNetworks.Clear();
+                options.KnownProxies.Clear();
+            });
+            builder.Services.AddHsts(options =>
+            {
+                options.MaxAge = TimeSpan.FromDays(365);
+                options.IncludeSubDomains = true;
+            });
+            builder.Services.AddHttpsRedirection(options =>
+            {
+                options.HttpsPort = 443;
+            });
 
             builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
              .AddJwtBearer(options =>
@@ -211,6 +236,20 @@ namespace DiscordCloneServer
             try
             {
                 var app = builder.Build();
+                app.UseForwardedHeaders();
+
+                if (!app.Environment.IsDevelopment())
+                {
+                    app.UseHsts();
+                    app.UseHttpsRedirection();
+                }
+
+                app.Use((context, next) =>
+                {
+                    ApplySecurityHeaders(context);
+                    return next();
+                });
+
                 app.UseWebSockets();
                 
                 string wwwrootPath = Path.Combine(builder.Environment.ContentRootPath, "wwwroot");
@@ -263,7 +302,9 @@ namespace DiscordCloneServer
                 app.MapControllers();
                 app.MapHub<Hubs.ChatHub>("/chatHub");
 
-                app.Logger.LogInformation("Starting Discord server on {Url}", "http://localhost:5018");
+                app.Logger.LogInformation(
+                    "Starting MyDiscord API in {Environment} environment.",
+                    app.Environment.EnvironmentName);
                 app.Run();
             }
             catch (Exception ex)
@@ -311,6 +352,15 @@ namespace DiscordCloneServer
 
             var extension = Path.GetExtension(requestPath);
             return !string.IsNullOrWhiteSpace(extension);
+        }
+
+        private static void ApplySecurityHeaders(HttpContext context)
+        {
+            var headers = context.Response.Headers;
+            headers.TryAdd("X-Content-Type-Options", "nosniff");
+            headers.TryAdd("X-Frame-Options", "DENY");
+            headers.TryAdd("Referrer-Policy", "strict-origin-when-cross-origin");
+            headers.TryAdd("Permissions-Policy", "geolocation=()");
         }
 
     }
